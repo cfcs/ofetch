@@ -1,0 +1,3 @@
+#mod_use "ofetch.ml";;
+open Ofetch;;
+
