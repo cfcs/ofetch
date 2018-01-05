@@ -2,7 +2,7 @@ native: builddir lib ofetch_cli.ml
 	@ cd _build/ && \
 	set -x && \
 	ocamlopt.opt -absname -unboxed-types -safe-string \
-		-w +1..999-57 -warn-error +a-26-27-4-33 \
+		-w +1..999-57-42 -warn-error +a-26-27-4-33-42 \
 		-ccopt -fPIE -compact -verbose \
 		unix.cmxa bigarray.cmxa ofetch.cmx \
 		./ofetch_cli.ml -o ./ofetch && \
@@ -17,7 +17,7 @@ builddir: *.ml
 lib: builddir ofetch.ml
 	@ cd _build/ && \
 	ocamlopt.opt -absname -unboxed-types -safe-string \
-		-w +1..999-57 -warn-error +a-26-27-4-33 \
+		-w +1..999-57-42 -warn-error +a-26-27-4-33-42 \
 		-ccopt -fPIE -compact -verbose \
 		-c -linkall \
 		bigarray.cmxa ./ofetch.ml
@@ -26,7 +26,7 @@ test: builddir lib ofetch.ml tests.ml
 	cd _build/ && \
 	cp ../tests.ml . && \
 	ocamlopt.opt -absname -unboxed-types -safe-string \
-		-w +1..999-57 -warn-error +a-26-27-4-33 \
+		-w +1..999-57-42 -warn-error +a-26-27-4-33-42 \
 		-ccopt -fPIE -compact \
 		unix.cmxa bigarray.cmxa ./ofetch.cmx ./tests.ml -o ./tests && \
 		./tests && echo "tests ran, all good"

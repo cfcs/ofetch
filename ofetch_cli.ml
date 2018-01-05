@@ -8,9 +8,9 @@ let try_chroot () =
   with Unix_error (EPERM, _, _ ) -> ()
 
 let fetch_conn inet_addr port =
-  let open UnixLabels in
   try_chroot () ;
-  let fd = socket ~domain:PF_INET ~kind:SOCK_STREAM ~protocol:0 in
+  let fd = Unix.(socket PF_INET SOCK_STREAM 0) in (* 4.05 introduces new args.*)
+  let open UnixLabels in
   set_nonblock fd ;
   let addr = ADDR_INET (inet_addr, port) in
   ( try connect fd ~addr with Unix_error (EINPROGRESS, _, _ ) -> () ) ; fd
