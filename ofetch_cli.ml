@@ -34,7 +34,7 @@ let mkconn ~(addr:Unix.inet_addr) ~hostname ~port ~uri ~local_filename =
     let open Bigarray in
     (*fstat  http://caml.inria.fr/pub/docs/manual-ocaml/libref/UnixLabels.LargeFile.html *)
     let seek = 0L and shared = true and dimensions = (-1) in
-    Bigarray.Array1.map_file fd ~pos:seek Char C_layout shared dimensions
+    (Bigarray.Array1.map_file [@ocaml.warnerror "-3"]) fd ~pos:seek Char C_layout shared dimensions
   in
   let buflen = UnixLabels.(getsockopt_int fd SO_RCVBUF) in
   let write_local buf pos len = UnixLabels.write file_channel ~buf ~pos ~len in
