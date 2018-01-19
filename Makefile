@@ -25,10 +25,11 @@ lib: builddir ofetch.ml
 test: builddir lib ofetch.ml tests.ml
 	cd _build/ && \
 	cp ../tests.ml . && \
-	ocamlopt.opt -absname -unboxed-types -safe-string \
+	ocamlfind opt -absname -unboxed-types -safe-string \
 		-w +1..999-57-42 -warn-error +a-26-27-4-33-42 \
 		-ccopt -fPIE -compact \
-		unix.cmxa bigarray.cmxa ./ofetch.cmx ./tests.ml -o ./tests && \
+		-package alcotest -package qcheck -linkpkg \
+		bigarray.cmxa ./ofetch.cmx ./tests.ml -o ./tests && \
 		./tests && echo "tests ran, all good"
 
 debug: builddir ofetch.ml
@@ -59,7 +60,7 @@ define compare_wget
 	    diff -y --suppress-common-lines "$(OFETCH).sha1" "$(WGET).sha1" || true\
 	  ; } && \
 	  { cmp -b $(OFETCH) $(WGET) || \
-		{ diff -y $(OFETCH) $(WGET) \
+		{ diff -y --suppress-common-lines $(OFETCH) $(WGET) \
 	          | head -10 ; exit 1 ; } ; \
 	  } ; \
 	} && \

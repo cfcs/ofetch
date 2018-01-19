@@ -19,6 +19,7 @@ The library supports concurrent fetching of multiple files.
 - [ ] Parallelized fetching of the same file is not implemented.
   - [ ] Pipelined (using `Connection: keep-alive`) fetching is not implemented.
 - [ ] Concurrent fetching of multiple files is not implemented in the CLI tool.
+- [ ] Writes to disk are blocking.
 - [ ] HTTPS is not implemented (to avoid depending on C-based TLS
       implementations).      
       A switch for building with [tls](https://github.com/mirleft/tls) support
@@ -35,20 +36,30 @@ Usage: ./_build/ofetch [-v] <LOCAL-FILENAME> <URL>
 
 ### Building
 
+Building the `ofetch` binary:
 ```shell
+# same as 'make native', built the ELF binary:
 make
+```
+
+Running the test suite:
+```shell
+# note that 'make test' requires 'ocamlfind', and the
+# ocaml libraries 'alcotest' and 'qcheck':
 make test
+# build the ofetch binary and try downloading various files from the internet,
+# running wget in parallel and comparing the downloaded files:
 make network-test
 ```
 
 For debugging there is also
 ```shell
+# build a bytecode executable for use with 'ocamldebug':
 make debug
 ```
 
 ### Contributing
 
 - Samples that trigger parsing/state machine errors are greatly appreciated.
-- A better test suite (using `alcotest` and `qcheck`/`crowbar`) would be nice.
-  - Extending the test suite with more coverage would also be great!
+- Extending the test suite with more coverage would also be great!
 - CI would be amazing, too!
