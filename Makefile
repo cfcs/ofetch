@@ -1,9 +1,14 @@
+# shared flags for the ocaml compiler:
+$(eval OFLAGS := -absname -unboxed-types -safe-string -verbose \
+		 -w +1..999-57-42 -warn-error +a-26-27-4-33-42 )
+
+# shared flags for c compilation (through the ocaml compiler):
+$(eval CFLAGS := -ccopt -fPIE -compact )
+
 native: builddir lib ofetch_cli.ml
 	@ cd _build/ && \
 	set -x && \
-	ocamlopt.opt -absname -unboxed-types -safe-string \
-		-w +1..999-57-42 -warn-error +a-26-27-4-33-42 \
-		-ccopt -fPIE -compact -verbose \
+	ocamlopt.opt $(OFLAGS) $(CFLAGS) \
 		unix.cmxa bigarray.cmxa ofetch.cmx \
 		./ofetch_cli.ml -o ./ofetch && \
 	{ { set +x ; } 2> /dev/null ; } && \
@@ -16,26 +21,21 @@ builddir: *.ml
 
 lib: builddir ofetch.ml
 	@ cd _build/ && \
-	ocamlopt.opt -absname -unboxed-types -safe-string \
-		-w +1..999-57-42 -warn-error +a-26-27-4-33-42 \
-		-ccopt -fPIE -compact -verbose \
+	ocamlopt.opt $(OFLAGS) $(CFLAGS) \
 		-c -linkall \
 		bigarray.cmxa ./ofetch.ml
 
 test: builddir lib ofetch.ml tests.ml
 	cd _build/ && \
 	cp ../tests.ml . && \
-	ocamlfind opt -absname -unboxed-types -safe-string \
-		-w +1..999-57-42 -warn-error +a-26-27-4-33-42 \
-		-ccopt -fPIE -compact \
+	ocamlfind opt $(OFLAGS) $(CFLAGS) \
 		-package alcotest -package qcheck -linkpkg \
 		bigarray.cmxa ./ofetch.cmx ./tests.ml -o ./tests && \
 		./tests && echo "tests ran, all good"
 
 debug: builddir ofetch.ml
 	cd _build/ && \
-	ocamlc.byte -absname -unboxed-types -safe-string \
-		-w +1..999-57 -warn-error +a-26-27-4-33 \
+	ocamlc.byte $(OFLAGS) \
 		-g -bin-annot \
 		unix.cma bigarray.cma ./ofetch.ml ./ofetch_cli.ml \
 		-o ./ofetch.bc && \
