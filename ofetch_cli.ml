@@ -1,5 +1,3 @@
-open Ofetch
-
 (* Enable cancellation of all downloads to fs that is out of space *)
 type fs_id = int * int
 let fs_id_of_fd fd : fs_id =
@@ -120,7 +118,7 @@ let () =
 
         let argflag f = argv := List.filter (fun v -> not @@ f v) !argv in
 
-        argflag (function | "-v" -> ofetch_global_debugging := true; true
+        argflag (function | "-v" -> Ofetch.ofetch_global_debugging := true; true
                           | _ -> false) ;
 
         if List.length !argv <> 3 then begin
@@ -132,6 +130,7 @@ let () =
         let local_filename = List.nth !argv 1 in
         let url = List.nth !argv 2 in
 
+        let open Ofetch in
         urlparse url >>= fun (hostname, port, uri) ->
         debug "urlparse: %S : %d %S\n%!" hostname port uri;
         (* let addr = Unix.inet_addr_of_string ip_v4_str in *)

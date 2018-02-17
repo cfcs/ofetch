@@ -513,23 +513,44 @@ let fetch_select (type fd)
   select_loop ~requests
 
 let urlparse str =
+  let parse_port str off len =
+    begin match int_of_string String.(sub str off len) with
+      | exception (Failure _) -> Error "urlparse: invalid port"
+      | port when port < 0 || 0xFFFF < port ->
+        Error "urlparse: invalid port range"
+      | port -> Ok port
+    end
+  in
+  (* NOTE this is by no means a full implementation of RFC 2396 *)
   Ok (String.split_on_char '#' str |> List.hd) >>= fun str ->
   res_assert (Format.asprintf "url %S doesn't start with 'http://'" str)
     (substr_equal ~off:0 (Bytes.of_string str) "http://" )
-   >>| (fun () -> String.sub str 7 (String.length str - 7)) >>= fun str ->
-  match String.index str '/' with
-  | exception Not_found -> Ok (str, 80, "/")
-  | i ->
-    begin match String.(sub str 0 i |> split_on_char ':') with
+  >>| (fun () -> String.sub str 7 (String.length str - 7)) >>= fun str ->
+  (* carve out hostname and port:*)
+  begin match String.index str '/' with
+  | exception Not_found -> Error "no / in URL"
+  | first_slash when str.[0] = '[' -> (* RFC 2732-style IPv6 address:*)
+    begin match String.index_from str 1 ']' with
+      | exception Not_found -> Error "No end-brace ']' in IPv6 URL"
+      | x when x > first_slash -> Error "Invalid IPv6 URL, contains / inside []"
+      | v6_end ->
+        let host = String.sub str (0+1) (v6_end-(0+1)) in
+        (if first_slash - v6_end <= 2 (* empty or just colon *)
+         then Ok 80
+         else parse_port str (v6_end+1) (first_slash-v6_end)
+        ) >>| fun port -> first_slash, host, port
+    end
+  | first_slash ->
+    begin match String.(sub str 0 first_slash |> split_on_char ':') with
       | host::port::[] ->
-        begin match int_of_string port with
-          | exception (Failure _) -> Error "urlparse: invalid port"
-          | port when port < 0 || 0xFFFF < port ->
-            Error "urlparse: invalid port range"
-          | port -> Ok (host, port)
-        end
-      | [host] -> Ok (host, 80)
+        parse_port port 0 String.(length port) >>|
+        fun port -> first_slash, host, port
+      | [host] -> Ok (first_slash, host, 80)
       | _ -> Error ("wtf is this host:port tuple" ^ str)
-    end >>| fun (host,port) ->
-    (host, port,
-     String.sub str i (String.length str - i))
+    end
+  end
+  >>= fun (slash, host, port) ->
+  if host = "" then Error "empty hostname"
+      else Ok
+          (host, port,
+           String.sub str slash (String.length str - slash))

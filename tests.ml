@@ -72,14 +72,22 @@ let qcheck_parse_content_range =
 let qcheck_urlparse =
   QCheck.Test.make ~count:30000
     ~name:"quickcheck_urlparse"
-    (QCheck.string)
-    (fun str ->
-       let _ =
-         ignore @@ urlparse ("http://"^str) ;
-         ignore @@ urlparse str ;
-         ignore @@ urlparse ("http://example.com" ^ str);
-         ignore @@ urlparse ("http://example.com:" ^ str);
-       in true)
+    QCheck.(pair string small_int)
+    (fun (str, port) ->
+         (ignore @@ urlparse ("http://"^str); true) &&
+         (ignore @@ urlparse str ; true) &&
+         (ignore @@ urlparse ("http://example.com" ^ str) ; true) &&
+         (match urlparse ("http://[2600::aaaa]/" ^ str) with
+          | Ok ("2600::aaaa", _, _) -> true
+          | _ -> false) &&
+         (match urlparse ("http://example.com:" ^ (string_of_int port)
+                          ^ "/" ^ str) with
+         | Ok ("example.com", parsed_port, _) when port = parsed_port -> true
+         | _ -> false) &&
+         (match urlparse ("http://example.com/" ^ str) with
+         | Ok ("example.com", _, _) -> true
+         | _ -> false)
+    )
 
 let qcheck_substr_equal_exn =
   QCheck.Test.make ~count:30000
