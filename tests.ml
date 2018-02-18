@@ -78,14 +78,18 @@ let qcheck_urlparse =
          (ignore @@ urlparse str ; true) &&
          (ignore @@ urlparse ("http://example.com" ^ str) ; true) &&
          (match urlparse ("http://[2600::aaaa]/" ^ str) with
-          | Ok ("2600::aaaa", _, _) -> true
+          | Ok ("http", "2600::aaaa", _, _) -> true
+          | _ -> false) &&
+         (match urlparse ("http://[2600::aaaa]:81/x" ^ str) with
+          | Ok ("http", "2600::aaaa", 81, _) -> true
           | _ -> false) &&
          (match urlparse ("http://example.com:" ^ (string_of_int port)
                           ^ "/" ^ str) with
-         | Ok ("example.com", parsed_port, _) when port = parsed_port -> true
+         | Ok ("http", "example.com", parsed_port, _)
+           when port = parsed_port -> true
          | _ -> false) &&
          (match urlparse ("http://example.com/" ^ str) with
-         | Ok ("example.com", _, _) -> true
+         | Ok ("http", "example.com", _, _) -> true
          | _ -> false)
     )
 

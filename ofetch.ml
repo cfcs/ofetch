@@ -18,6 +18,29 @@
   - https://en.wikipedia.org/wiki/List_of_HTTP_header_fields
 *)
 
+module type Peer_S =
+sig
+  type t
+  type init_data
+
+  val init : protocol:string -> init_data -> (t, string) result
+
+  val select : t list -> t list -> t list -> t list * t list * t list
+  (* TODO also need a way to signal state updates, even to fds that
+     are not to be read/written (use exceptfds for this?)
+  *)
+
+  val recv_peer : t -> buf:bytes -> pos:int -> len:int -> int * t
+  (* TODO should be changed to allow error handling*)
+
+  val write_peer : t -> buf:string -> pos:int -> len:int -> int * t
+  (* write a substring to a peer (or buffer it).
+     TODO interface should be changed to allow error handling. *)
+
+  val equal : t -> t -> bool
+  (* bool: whether the two t operate on the same sockets *)
+end
+
 let ofetch_global_debugging = ref false (* <-- print debug messages to stderr *)
 
 let debug ?(fd=stderr) =
@@ -441,6 +464,7 @@ let new_request ~connection_handle ~buflen ~write_local
 *)
 
 let fetch_select (type fd)
+    ~(equal    : fd -> fd -> bool )
     ~(requests : fd request list)
     ~(select: fd list -> fd list -> fd list ->
       fd list * fd list * fd list)
@@ -472,7 +496,7 @@ let fetch_select (type fd)
           let in_set ~req set cb =
             map_if_some ~default:(Ok req)
               (fun io_cb -> io_cb req >>| fun (new_req, _f_cb) -> new_req)
-              (if List.exists (fun fd -> fd = req.io) set then cb else None) in
+              (if List.exists (fun fd -> equal fd req.io) set then cb else None) in
           let null req = {req with read_cb = None ; write_cb = None} in
           begin match in_set ~req readable req.read_cb with
             | Error err -> do_io (err::errors) (null req::acc) tl
@@ -491,7 +515,7 @@ let fetch_select (type fd)
       errors,
       List.map (fun old ->
           (* update with new state if applicable: *)
-          try List.find (fun n -> n.io = old.io) new_states
+          try List.find (fun n -> equal n.io old.io) new_states
           with Not_found -> old
         ) requests
       |> List.partition (fun r -> r.read_cb = None && r.write_cb = None)
@@ -523,9 +547,17 @@ let urlparse str =
   in
   (* NOTE this is by no means a full implementation of RFC 2396 *)
   Ok (String.split_on_char '#' str |> List.hd) >>= fun str ->
-  res_assert (Format.asprintf "url %S doesn't start with 'http://'" str)
-    (substr_equal ~off:0 (Bytes.of_string str) "http://" )
-  >>| (fun () -> String.sub str 7 (String.length str - 7)) >>= fun str ->
+  begin match substr_equal ~off:0 (Bytes.of_string str) "https://",
+              substr_equal ~off:0 (Bytes.of_string str) "http://" with
+  | true, _-> Ok "https"
+  | _, true -> Ok "http"
+  | false, false -> Error "unknown protocol in URL"
+  end
+  >>= fun protocol ->
+  res_assert "empty URL" ((String.length protocol + 3) < String.length str)
+  >>= fun () ->
+  let str = ( let prot_len = String.length protocol + 3 in
+              String.sub str prot_len (String.length str - prot_len) ) in
   (* carve out hostname and port:*)
   begin match String.index str '/' with
   | exception Not_found -> Error "no / in URL"
@@ -535,9 +567,12 @@ let urlparse str =
       | x when x > first_slash -> Error "Invalid IPv6 URL, contains / inside []"
       | v6_end ->
         let host = String.sub str (0+1) (v6_end-(0+1)) in
-        (if first_slash - v6_end <= 2 (* empty or just colon *)
+        (if first_slash - v6_end <= 1 (* empty or just colon *)
          then Ok 80
-         else parse_port str (v6_end+1) (first_slash-v6_end)
+         else if str.[v6_end+1] == ':'
+         then
+           parse_port str (v6_end+2) (first_slash-v6_end-2)
+         else Error "parsing port"
         ) >>| fun port -> first_slash, host, port
     end
   | first_slash ->
@@ -552,5 +587,5 @@ let urlparse str =
   >>= fun (slash, host, port) ->
   if host = "" then Error "empty hostname"
       else Ok
-          (host, port,
+          (protocol, host, port,
            String.sub str slash (String.length str - slash))

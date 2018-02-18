@@ -5,11 +5,24 @@ $(eval OFLAGS := -absname -unboxed-types -safe-string -verbose \
 # shared flags for c compilation (through the ocaml compiler):
 $(eval CFLAGS := -ccopt -fPIE -compact )
 
-native: builddir lib ofetch_cli.ml
+ifeq "$(shell ocamlfind query tls 2>&- || true)" ""
+$(eval OFETCH_WRAP_FILE := ofetch_unix)
+$(eval OFETCH_WRAP_DEPS := ./ofetch_unix.mli)
+$(eval OCOM := ocamlopt.opt unix.cmxa bigarray.cmxa )
+else
+$(eval OFETCH_WRAP_FILE := ofetch_tls_wrap)
+$(eval OFETCH_WRAP_DEPS := ./ofetch_unix.mli ./ofetch_unix.ml ./ofetch_tls.ml)
+$(eval OCOM := ocamlfind opt -package nocrypto.unix -package tls -linkpkg )
+endif
+
+cli: builddir lib ofetch_cli.ml
 	@ cd _build/ && \
 	set -x && \
-	ocamlopt.opt $(OFLAGS) $(CFLAGS) \
-		unix.cmxa bigarray.cmxa ofetch.cmx \
+	cp $(OFETCH_WRAP_FILE).ml ofetch_wrap.ml && \
+	cp $(OFETCH_WRAP_FILE).mli ofetch_wrap.mli && \
+	$(OCOM) $(OFLAGS) $(CFLAGS) \
+		ofetch.cmx \
+		$(OFETCH_WRAP_DEPS) ./ofetch_wrap.mli ./ofetch_wrap.ml \
 		./ofetch_cli.ml -o ./ofetch && \
 	{ { set +x ; } 2> /dev/null ; } && \
 	strip ./ofetch && \
@@ -17,7 +30,7 @@ native: builddir lib ofetch_cli.ml
 
 builddir: *.ml
 	@ mkdir -p _build/ && \
-	  cp ./*.ml _build/
+	  cp ./*.ml ./*.mli _build/
 
 lib: builddir ofetch.ml
 	@ cd _build/ && \
@@ -51,23 +64,23 @@ define compare_wget
 	@ cd _build/ && \
 	rm -f $(OFETCH) $(WGET) && \
 	set -x && \
-	time wget -O $(WGET) "$2" && \
+	time wget --tries 1 -O $(WGET) "$2" && \
 	time ./ofetch -v $(OFETCH) "$2" ; \
 	{ { set +x ; } 2> /dev/null ; } && \
 	{ \
- 	  { sha1sum "$(OFETCH)" > "$(OFETCH).sha1" && \
+	  { sha1sum "$(OFETCH)" > "$(OFETCH).sha1" && \
 	    sha1sum "$(WGET)" > "$(WGET).sha1" && \
 	    diff -y --suppress-common-lines "$(OFETCH).sha1" "$(WGET).sha1" || true\
 	  ; } && \
 	  { cmp -b $(OFETCH) $(WGET) || \
 		{ diff -y --suppress-common-lines $(OFETCH) $(WGET) \
-	          | head -10 ; exit 1 ; } ; \
+		  | head -10 ; exit 1 ; } ; \
 	  } ; \
 	} && \
 	echo ============
 endef
 
-network-test: native ./_build/ofetch
+network-test: cli ./_build/ofetch
 	@ # Chunked:
 	$(call compare_wget,lists-ocaml-org,"http://lists.ocaml.org/listinfo/platform/")
 	@ # Content-Length:
