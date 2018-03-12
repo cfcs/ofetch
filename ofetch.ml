@@ -429,7 +429,9 @@ let fetch_download ~write_local ~recv_peer
   let len_read = recv_peer buf 0 buflen in
   read_and_handle_bytes state 0 len_read >>| begin function
     | Done -> {request with state = Done; read_cb = None }, None
-    | new_state -> { request with state = new_state} , None
+    | ( Reading_headers
+      | Reading_body _) as new_state ->
+      { request with state = new_state} , None
   end
 
 let new_request ~connection_handle ~buflen ~write_local

@@ -1,4 +1,4 @@
-FLG -safe-string -warn_error +a+A-26-4 -w +A+1..999-57-4
+FLG -safe-string -warn_error +a+A-26 -w +A+1..999-57-4
 S .
 B _build/
 

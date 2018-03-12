@@ -46,6 +46,9 @@ test: builddir lib ofetch.ml tests.ml
 		bigarray.cmxa ./ofetch.cmx ./tests.ml -o ./tests && \
 		./tests && echo "tests ran, all good"
 
+install: cli
+	cd _build && cp ofetch $(PREFIX)/ofetch
+
 debug: builddir ofetch.ml
 	cd _build/ && \
 	ocamlc.byte $(OFLAGS) \

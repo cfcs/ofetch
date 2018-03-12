@@ -1,0 +1,26 @@
+opam-version: "1.2"
+maintainer: "root@localhost"
+authors: [ "none" ]
+license: "gopher://license.to.kill"
+homepage: "https://github.com/cfcs/ofetch"
+dev-repo: "https://github.com/cfcs/ofetch.git"
+bug-reports: "https://github.com/cfcs/ofetch/issues"
+
+available: [ ocaml-version >= "4.04.2" & os != "windows" ]
+
+build: [
+  [ "%{make}%" ]
+]
+build-test: [
+  [ "%{make}%" "test" ]
+]
+
+install: [ # TODO this doesn't seem to be triggered by opam:
+  [ "%{make}%" "PREFIX=%{prefix}%" "install" ]
+]
+
+depends: [
+  "ocamlfind" {test}
+  "alcotest"  {test}
+  "qcheck"    {test}
+]

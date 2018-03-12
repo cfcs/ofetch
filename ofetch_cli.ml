@@ -30,10 +30,11 @@ let open_new_file ~filename =
   | Unix.(Unix_error (a, b, c)) -> Error (a,b,c)
 
 let rec retry_signals f =
+  let open Unix in
   match f () with
-  | exception Unix.(Unix_error ((EAGAIN | EINTR), _ , _ )) -> retry_signals f
-  | exception Unix.(Unix_error (ECONNRESET, _, _ )) -> failwith "econnresetyo"
-  | exception Unix.(Unix_error (ECONNREFUSED, _, _ )) -> failwith "econnrefused"
+  | exception Unix_error ((EAGAIN | EINTR), _ , _ ) -> retry_signals f
+  | exception Unix_error (ECONNRESET, _, _ ) -> failwith "econnresetyo"
+  | exception Unix_error (ECONNREFUSED, _, _ ) -> failwith "econnrefused"
   | ok -> ok
 
 let mkconn ~protocol ~(addr:Unix.inet_addr) ~hostname ~port ~uri ~local_filename

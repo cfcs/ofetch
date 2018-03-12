@@ -7,10 +7,12 @@ type t = { peer_fd : Unix.file_descr ;
 let equal a b = a = b
 
 let rec retry_signals f =
+  let open Unix in
   match f () with
-  | exception Unix.(Unix_error ((EAGAIN | EINTR), _ , _ )) -> retry_signals f
-  | exception Unix.(Unix_error (ECONNRESET, _, _ )) -> failwith "econnresetyo"
-  | exception Unix.(Unix_error (ECONNREFUSED, _, _ )) -> failwith "econnrefused"
+  | exception Unix_error ((EAGAIN | EINTR), _ , _ ) ->
+    retry_signals f
+  | exception Unix_error (ECONNRESET, _, _ ) -> failwith "econnresetyo"
+  | exception Unix_error (ECONNREFUSED, _, _ ) -> failwith "econnrefused"
   | ok -> ok
 
 let select

@@ -38,7 +38,8 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
                       Bytes.(sub hd n (len-n))::tl;}
         end
 
-    let select_tls_t (readable : 'fd list) (writeable : 'fd list) (except : 'fd list)
+    let select_tls_t (readable : 'fd list) (writeable : 'fd list)
+        (except : 'fd list)
       : 'fd list * 'fd list * 'fd list =
       let underlying_t = List.map (fun t -> t.underlying_t) in
       let our_t selected_lst original =
@@ -73,14 +74,16 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
         List.partition (function HTTP _ -> true | _ -> false) writeable in
       let e_http, e_https =
         List.partition (function HTTP _ -> true | _ -> false) except in
-      let to_u = List.map (function HTTP fd -> fd) in
+      let to_u = List.map (function HTTP fd -> fd | HTTPS _ ->failwith "OOPS")in
       let of_u = List.map (function fd -> HTTP fd) in
       let hr, hw, he =
         let a, b, c =
           Underlying.select (to_u r_http) (to_u w_http) (to_u e_http)
         in (of_u a), (of_u b), (of_u c)
       in
-      let to_s = List.map (function HTTPS fd -> fd) in
+      let to_s = List.map (function
+          | HTTPS fd -> fd
+          | HTTP _ -> failwith "TODO HTTP not expected here") in
       let of_u = List.map (function fd -> HTTPS fd) in
       let sr, sw, se = select_tls_t (to_s r_https) (to_s w_https) (to_s e_https)
       in (of_u sr)@hr, (of_u sw)@hw, (of_u se)@he (* try to consolidate *)
