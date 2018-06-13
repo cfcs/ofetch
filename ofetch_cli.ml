@@ -8,7 +8,7 @@ let fs_id_of_fd fd : fs_id =
 type unix_handle =
   { fs: fs_id ;
     download_file : Unix.file_descr ;
-    peer_fd : Ofetch_wrap.t ;
+    peer_fd : Ofetch_wrap.t ref ;
   }
 
 let is_same_fs fs_id handle = (* helper for failing downloads to full disk *)
@@ -29,6 +29,8 @@ let open_new_file ~filename =
   with
   | Unix.(Unix_error (a, b, c)) -> Error (a,b,c)
 
+open Ofetch.Results
+
 let rec retry_signals f =
   let open Unix in
   match f () with
@@ -41,36 +43,36 @@ let mkconn ~protocol ~(addr:Unix.inet_addr) ~hostname ~port ~uri ~local_filename
   : (unix_handle Ofetch.request, string) result =
   let peer_fd =
     match fetch_conn protocol addr port with
-    | Ok x -> x
+    | Ok x -> ref x
     | Error s -> failwith ("failed to connect:" ^ s)
   in
-  let open Ofetch in
   begin match open_new_file ~filename:local_filename with
     | Ok fd -> Ok fd
     | Error (Unix.EEXIST, "open", fn) ->
       Error (Format.asprintf "Output file %S already exists." fn)
     | Error _ -> Error "unix error while opening file"
   end >>| fun file_channel ->
-  let mmap fd =
+  (*let mmap fd =
     (*let open Unix.LargeFile in*)
     let open Bigarray in
     (*fstat  http://caml.inria.fr/pub/docs/manual-ocaml/libref/UnixLabels.LargeFile.html *)
     let seek = 0L and shared = true and dimensions = (-1) in
     (Bigarray.Array1.map_file [@ocaml.warnerror "-3"]) fd ~pos:seek Char C_layout shared dimensions
-  in
+  in*)
   let buflen = 8192 in (*TODO detect from Peer_S *)
   let write_local buf pos len =
     if len = 0 then 0 else (* fast track *)
       retry_signals (fun () -> UnixLabels.write file_channel ~buf ~pos ~len) in
   let recv_peer buf pos len =
     retry_signals (fun () -> (* TODO fd stays the same, so ignore it: *)
-        match Ofetch_wrap.recv_peer peer_fd ~buf ~pos ~len with
-        new_len, _new_fd -> new_len
+        match Ofetch_wrap.recv_peer !peer_fd ~buf ~pos ~len with
+        | Ok (new_len, new_fd) -> peer_fd := new_fd; Ok new_len
+        | Error _ as err -> err
       ) in
   let write_peer buf pos len =
     retry_signals (fun () ->
-        match Ofetch_wrap.write_peer peer_fd ~buf ~pos ~len with
-        new_len, _new_fd -> new_len
+        match Ofetch_wrap.write_peer !peer_fd ~buf ~pos ~len with
+        new_len, new_fd -> peer_fd := new_fd ; new_len
       ) in
   let handle =
     { fs = fs_id_of_fd file_channel ;
@@ -92,13 +94,13 @@ let unix_select
      TODO if -1 == uerror("select", Nothing);
      TODO how to handle timeout?
   *)
-  let read = List.map (fun r -> r.peer_fd) read_handles in
-  let write = List.map (fun r -> r.peer_fd) write_handles in
-  let except = List.map (fun r -> r.peer_fd) except_handles in
+  let read = List.map (fun r -> !(r.peer_fd)) read_handles in
+  let write = List.map (fun r -> !(r.peer_fd)) write_handles in
+  let except = List.map (fun r -> !(r.peer_fd)) except_handles in
   match retry_signals (fun () -> Ofetch_wrap.select read write except) with
     | r, w, e ->
       let get_handle needle haystack =
-        List.find (fun {peer_fd ; _ } -> Ofetch_wrap.equal peer_fd needle)
+        List.find (fun {peer_fd ; _ } -> Ofetch_wrap.equal !peer_fd needle)
           haystack in
       let handles_of_peer_fds fds haystack =
         List.map (fun fd -> get_handle fd haystack) fds in
@@ -127,7 +129,7 @@ let () =
 
         if List.length !argv <> 3 then begin
           Printf.eprintf
-            "Usage: %s [-v] <LOCAL-FILENAME> <URL>\n" Sys.argv.(0) ;
+            "Usage: %s [-v] <LOCAL-FILENAME> <URL>\n%!" Sys.argv.(0) ;
           exit 1
         end ;
 
@@ -138,14 +140,17 @@ let () =
         urlparse url >>= fun (protocol, hostname, port, uri) ->
         debug "urlparse: protocol: %s :// %S : %d %S\n%!"
           protocol hostname port uri;
+
         (* let addr = Unix.inet_addr_of_string ip_v4_str in *)
         let addr = (UnixLabels.gethostbyname hostname).Unix.h_addr_list.(0) in
 
-        mkconn ~protocol ~addr ~hostname ~port ~uri ~local_filename
+        mkconn ~protocol
+          ~addr ~hostname ~port ~uri ~local_filename
         >>= fun request ->
         (*mkconn ~addr ~hostname ~port ~uri
           ~local_filename:(local_filename ^ ".2") >>= fun request2 ->*)
-        fetch_select ~equal:(fun a b -> Ofetch_wrap.equal a.peer_fd b.peer_fd)
+        fetch_select ~equal:(fun a b ->
+            Ofetch_wrap.equal !(a.peer_fd) !(b.peer_fd))
           ~requests:[request (*; request2*)] ~select:unix_select
       with
       | Ok () -> exit 0 (* TODO sync file buffers, close files *)

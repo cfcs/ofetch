@@ -74,23 +74,41 @@ let qcheck_urlparse =
     ~name:"quickcheck_urlparse"
     QCheck.(pair string small_int)
     (fun (str, port) ->
-         (ignore @@ urlparse ("http://"^str); true) &&
-         (ignore @@ urlparse str ; true) &&
-         (ignore @@ urlparse ("http://example.com" ^ str) ; true) &&
-         (match urlparse ("http://[2600::aaaa]/" ^ str) with
-          | Ok ("http", "2600::aaaa", _, _) -> true
-          | _ -> false) &&
-         (match urlparse ("http://[2600::aaaa]:81/x" ^ str) with
-          | Ok ("http", "2600::aaaa", 81, _) -> true
-          | _ -> false) &&
-         (match urlparse ("http://example.com:" ^ (string_of_int port)
-                          ^ "/" ^ str) with
-         | Ok ("http", "example.com", parsed_port, _)
-           when port = parsed_port -> true
-         | _ -> false) &&
-         (match urlparse ("http://example.com/" ^ str) with
-         | Ok ("http", "example.com", _, _) -> true
-         | _ -> false)
+       (* hopefully we don't throw exceptions: *)
+       (ignore @@ urlparse ("http://"^str); true) &&
+       (ignore @@ urlparse str ; true) &&
+       (ignore @@ urlparse ("http://example.com" ^ str) ; true) &&
+       (* domains: *)
+       (match urlparse ("http://example.com/" ^ str) with
+        | Ok ("http", "example.com", 80, _) -> true
+        | _ -> false) &&
+       (* IPv6: *)
+       (match urlparse ("http://[2600::aaaa]/" ^ str) with
+        | Ok ("http", "2600::aaaa", _, _) -> true
+        | _ -> false) &&
+       (match urlparse ("http://[2600::aaaa]:81/x" ^ str) with
+        | Ok ("http", "2600::aaaa", 81, _) -> true
+        | _ -> false) &&
+       (match urlparse ("http://[2600::aaaa]:"^(string_of_int port)
+                        ^ "/" ^ str) with
+       | Ok ("http", "2600::aaaa", p_port, _) when p_port = port -> true
+       | _ -> false) &&
+       (match urlparse ("http://[:/" ^ str) with
+        | Error "Invalid IPv6 URL, contains / inside []" ->
+          true (* <- this is invalid, so we do expect an error *)
+        | Error "No end-brace ']' in IPv6 URL" when
+            not (String.contains str ']')
+            || ( (* urlparser drops things after '#': *)
+              String.contains str '#' &&
+              String.index str '#' < String.index str ']'
+            ) -> true (* <- we do expect a ] after a [ *)
+        | _ -> false) &&
+       (* ports: *)
+       (match urlparse ("http://example.com:" ^ (string_of_int port)
+                        ^ "/" ^ str) with
+       | Ok ("http", "example.com", parsed_port, _)
+         when port = parsed_port -> true
+       | _ -> false)
     )
 
 let qcheck_substr_equal_exn =

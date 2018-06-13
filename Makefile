@@ -1,18 +1,20 @@
 # shared flags for the ocaml compiler:
 $(eval OFLAGS := -absname -unboxed-types -safe-string -verbose \
-		 -w +1..999-57-42 -warn-error +a-26-27-4-33-42 )
+		 -w +1..999-57-42-4-38 -warn-error +a-26-27-4-33 )
 
 # shared flags for c compilation (through the ocaml compiler):
 $(eval CFLAGS := -ccopt -fPIE -compact )
 
+# dependencies for the ofetch cli utility:
 ifeq "$(shell ocamlfind query tls 2>&- || true)" ""
-$(eval OFETCH_WRAP_FILE := ofetch_unix)
-$(eval OFETCH_WRAP_DEPS := ./ofetch_unix.mli)
-$(eval OCOM := ocamlopt.opt unix.cmxa bigarray.cmxa )
+  $(eval OFETCH_WRAP_FILE := ofetch_unix)
+  $(eval OFETCH_WRAP_DEPS := ./ofetch_unix.mli)
+  $(eval OCOM := ocamlopt.opt unix.cmxa bigarray.cmxa )
 else
-$(eval OFETCH_WRAP_FILE := ofetch_tls_wrap)
-$(eval OFETCH_WRAP_DEPS := ./ofetch_unix.mli ./ofetch_unix.ml ./ofetch_tls.ml)
-$(eval OCOM := ocamlfind opt -package nocrypto.unix -package tls -linkpkg )
+  # build with TLS support:
+  $(eval OFETCH_WRAP_FILE := ofetch_tls_wrap)
+  $(eval OFETCH_WRAP_DEPS := ./ofetch_unix.mli ./ofetch_unix.ml ./ofetch_tls.mli ./ofetch_tls.ml)
+  $(eval OCOM := ocamlfind opt -package nocrypto.unix -package tls -linkpkg)
 endif
 
 cli: builddir lib ofetch_cli.ml
@@ -32,11 +34,11 @@ builddir: *.ml
 	@ mkdir -p _build/ && \
 	  cp ./*.ml ./*.mli _build/
 
-lib: builddir ofetch.ml
+lib: builddir ofetch.ml ofetch.mli
 	@ cd _build/ && \
 	ocamlopt.opt $(OFLAGS) $(CFLAGS) \
 		-c -linkall \
-		bigarray.cmxa ./ofetch.ml
+		bigarray.cmxa ./ofetch.mli ./ofetch.ml
 
 test: builddir lib ofetch.ml tests.ml
 	cd _build/ && \
@@ -67,7 +69,7 @@ define compare_wget
 	@ cd _build/ && \
 	rm -f $(OFETCH) $(WGET) && \
 	set -x && \
-	time wget --tries 1 -O $(WGET) "$2" && \
+	time wget --max-redirect=0 --content-on-error --no-hsts --tries 1 -O $(WGET) "$2" ; \
 	time ./ofetch -v $(OFETCH) "$2" ; \
 	{ { set +x ; } 2> /dev/null ; } && \
 	{ \
@@ -93,8 +95,9 @@ network-test: cli ./_build/ofetch
 	$(call compare_wget,mccs,"http://www.i3s.unice.fr/~cpjm/misc/mccs-1.1-srcs.tgz")
 	  @ # this one reports Accept-Ranges: bytes:
 	$(call compare_wget,debian-sha256,"http://ftp.nl.debian.org/debian/dists/stretch/main/installer-armhf/current/images/SHA256SUMS")
+	@ # TLS
+	$(call compare_wget,debian-sha256,"https://mirage.io/")
 	@ # misc
-	$(call compare_wget,pinata,"http://ownme.ipredator.se/")
 
 clean:
 	@ rm -fr ./_build/

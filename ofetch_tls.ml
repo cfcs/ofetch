@@ -1,12 +1,14 @@
 type 'underlying_t tls_t =
   { state : Tls.Engine.state ;
-    wire_send_queue : bytes list ;
+    wire_send_queue : string list ;
     underlying_t : 'underlying_t ;
   }
 
 type 'a tt =
-  | HTTP of 'a
-  | HTTPS of 'a tls_t
+  | Passthru of 'a
+  | TLS of 'a tls_t
+
+open Ofetch.Results
 
 module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
   Ofetch.Peer_S with type t = Underlying.t tt
@@ -16,32 +18,49 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
   struct
     type t = Underlying.t tt
     type init_data = Underlying.init_data
+
     let equal a b =
       match a,b with
-      | HTTP a, HTTP b -> Underlying.equal a b
-      | HTTPS a, HTTPS b ->
+      | Passthru a, Passthru b ->
+        Underlying.equal a b
+      | TLS a, TLS b ->
         Underlying.equal a.underlying_t b.underlying_t
-      | _ -> false
+      | TLS a, Passthru b ->
+        Underlying.equal a.underlying_t b
+      | Passthru a, TLS b ->
+        Underlying.equal a b.underlying_t
+
 
     let pop_queued t =
       match t.wire_send_queue with
-      | [] -> t
+      | [] -> false, t
       | hd::tl ->
-        let len = Bytes.length hd in
+        true,
+        let len = String.length hd in
+        Ofetch.debug "GOING TO WRITE %d\n%!" len ;
         begin match Underlying.write_peer t.underlying_t
-                      ~buf:(Bytes.to_string hd) ~pos:0 ~len
+                      ~buf:hd ~pos:0 ~len
           with
-          | 0 , _ -> failwith "fuck"
-          | n , _ when n = len -> {t with wire_send_queue = tl; }
-          | n , _ ->
-            {t with wire_send_queue =
-                      Bytes.(sub hd n (len-n))::tl;}
+          | 0 , underlying_t ->   { t with underlying_t }
+          | n , underlying_t when n = len ->
+            { t with underlying_t ; wire_send_queue = tl; }
+          | n , underlying_t ->
+            {t with underlying_t ;
+                    wire_send_queue =
+                      ( if len-n <> 0 then [String.(sub hd n (len-n))]
+                        else []) @ tl;}
         end
 
+    let tls_is_writeable t =
+      Tls.Engine.can_handle_appdata t.state (* next write will be app data*)
+
+    let tls_needs_write_from_queue t =
+      [] <> t.wire_send_queue (* next write will send from queue *)
+
+(*
     let select_tls_t (readable : 'fd list) (writeable : 'fd list)
         (except : 'fd list)
       : 'fd list * 'fd list * 'fd list =
-      let underlying_t = List.map (fun t -> t.underlying_t) in
       let our_t selected_lst original =
         List.map (fun selected ->
             List.find (fun o -> o.underlying_t = selected) original)
@@ -50,128 +69,147 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
       (* first we determine which TLS sessions are ready to receive data: *)
       (*let readable, _ = List.partition
           (fun t -> Tls.Engine.can_handle_appdata t.state) readable in*)
-      let writeable, _ = List.partition
-          (fun t -> Tls.Engine.can_handle_appdata t.state
-                    ||  [] <> t.wire_send_queue) writeable in
+      let writeable, _ = List.partition tls_is_writeable writeable in
+      readable, writeable, except
+                           *)
+    let select (readable:Underlying.t tt list) (writeable:Underlying.t tt list)
+        (except:Underlying.t tt list)
+      : Underlying.t tt list * Underlying.t tt list * Underlying.t tt list =
+      let to_u = List.map (function
+          | Passthru fd -> fd
+          | TLS t -> t.underlying_t) in
 
-      (* Then we determine which TLS sessions have selectable underlying fds: *)
-      match Underlying.select
-              (underlying_t readable)
-              (underlying_t writeable)
-              (underlying_t except) with
-      | r, w, e ->
-        let w_app, w_queued =
-          List.partition (fun t -> t.wire_send_queue = [] ) (our_t w writeable)
-        in
-        let w_queued = List.map pop_queued w_queued in
-        (* TODO how to return changed states here? *)
-        (our_t r readable), w_app, (our_t e except)
-
-    let select readable writeable except =
-      let r_http, r_https =
-        List.partition (function HTTP _ -> true | _ -> false) readable in
-      let w_http, w_https =
-        List.partition (function HTTP _ -> true | _ -> false) writeable in
-      let e_http, e_https =
-        List.partition (function HTTP _ -> true | _ -> false) except in
-      let to_u = List.map (function HTTP fd -> fd | HTTPS _ ->failwith "OOPS")in
-      let of_u = List.map (function fd -> HTTP fd) in
-      let hr, hw, he =
-        let a, b, c =
-          Underlying.select (to_u r_http) (to_u w_http) (to_u e_http)
-        in (of_u a), (of_u b), (of_u c)
+      Ofetch.debug "OK COOL SELECT %d %d %d\n"
+        (List.length readable) (List.length writeable) (List.length except);
+      let u_w, _ = List.partition (function
+          | Passthru _ -> true | TLS t ->
+            let x = tls_is_writeable t and y = tls_needs_write_from_queue t in
+            Ofetch.debug "is writeable: %b needs writes from queue: %b\n%!" x y;
+            x || y) writeable in
+      let u_r, u_w, u_e =
+        Underlying.select (to_u readable) (to_u u_w) (to_u except)
       in
-      let to_s = List.map (function
-          | HTTPS fd -> fd
-          | HTTP _ -> failwith "TODO HTTP not expected here") in
-      let of_u = List.map (function fd -> HTTPS fd) in
-      let sr, sw, se = select_tls_t (to_s r_https) (to_s w_https) (to_s e_https)
-      in (of_u sr)@hr, (of_u sw)@hw, (of_u se)@he (* try to consolidate *)
+      (let l = List.length in
+       Ofetch.debug "HTTP(S?): %d %d %d\n"
+         (l readable) (l writeable) (l except));
+      List.map (fun ut -> List.find (function
+          | Passthru xxx -> Underlying.equal ut xxx
+          | TLS xxx -> Underlying.equal ut xxx.underlying_t) readable) u_r,
+      List.map (fun ut -> List.find (function
+          | Passthru xxx -> Underlying.equal ut xxx
+          | TLS xxx -> Underlying.equal ut xxx.underlying_t) writeable) u_w,
+      List.map (fun ut -> List.find (function
+          | Passthru xxx -> Underlying.equal ut xxx
+          | TLS xxx -> Underlying.equal ut xxx.underlying_t) except) u_e
 
-    let init ~protocol (underlying_init : Underlying.init_data) =
+    let init ~(protocol)
+        (underlying_init : init_data) : (t, string) result =
       begin match protocol with
-        | "http" -> begin match Underlying.init ~protocol underlying_init with
-            | Ok x -> Ok (HTTP x)
-            | Error x -> Error x
-          end
-        | "https" ->
+        | "tls" ->
           let tls_config : Tls.Config.client =
             (* cacerts.pem, fp pinning, .. *)
             Tls.Config.client ~authenticator:X509.Authenticator.null ()
           in
           let state, to_send = Tls.Engine.client tls_config in
-          begin match Underlying.init ~protocol:"http" underlying_init with
-          | Ok underlying_t ->
-            Ok (HTTPS {state ;
-                       underlying_t ;
-                       wire_send_queue = [Cstruct.to_bytes to_send]})
-          | Error x -> Error x
-          end
-        | _ -> Error "unsupport http(s) protocol"
+          Underlying.init ~protocol:"tcp" underlying_init
+            >>| fun underlying_t ->
+            (TLS {state ; underlying_t ;
+                    wire_send_queue = [Cstruct.to_string to_send]})
+        | "tcp" ->
+          Underlying.init ~protocol:"tcp" underlying_init >>| fun x -> Passthru x
+        | protocol ->
+          Error ("TLS: Unsupported protocol: " ^ String.escaped protocol )
       end
 
-    let recv_peer_tls_t fd ~buf ~(pos:int) ~(len:int) : int * t =
-      (* Initialize tmp buf: *)
-      let ubuf = Bytes.init len (fun _ -> '\x00') in
-      let len_ret, underlying_t =
-        Underlying.recv_peer fd.underlying_t ~buf ~pos ~len
-      in
-      let received = Cstruct.of_bytes (Bytes.sub ubuf 0 len_ret) in
-      begin match Tls.Engine.handle_tls fd.state received with
-        | `Ok ((`Eof | `Alert _), _, `Data (Some data)) ->
-          (* ignore response, kill connection, return data *)
-          (* TODO invalidate state *)
-          0, HTTPS {state = fd.state; underlying_t ; wire_send_queue = [] }
-        | `Ok ((`Eof | `Alert _), _, `Data None)
-        | `Fail (_, _) ->
-          (* ignore response, kill connection *)
-          (* TODO invalidate state *)
-          ignore @@ failwith "TODO invalidate state on tls error" ;
-          0, HTTPS {state = fd.state; underlying_t ; wire_send_queue = [] }
-        | `Ok (`Ok state, `Response resp, `Data recvd) ->
+    let recv_peer_tls_t (fd: 'a tls_t) ~buf ~(pos:int) ~(len:int)
+      : (int * t, int) result =
+      Ofetch.debug "reading TLS from underlying\n%!";
+      let underlying_buf = Bytes.init len (fun _ -> '\x00') in
+      Underlying.recv_peer fd.underlying_t ~buf:underlying_buf ~pos ~len
+      >>= fun (len_ret, underlying_t) ->
+      Ofetch.debug "received: %S\n%!"
+        (Bytes.sub_string underlying_buf 0 len_ret);
+      begin match Tls.Engine.handle_tls fd.state @@
+        let cs = Cstruct.create len_ret in
+        Cstruct.blit_from_bytes underlying_buf 0 cs 0 len_ret; cs with
+      | `Ok ((`Eof | `Alert _), `Response _, `Data (Some data)) ->
+        (* ignore response, kill connection, return data.
+           TODO maybe we should try to handle the Response. *)
+        let recvd_len = Cstruct.len data in
+        Cstruct.blit_to_bytes data 0 buf 0 recvd_len ;
+        Error recvd_len
+      | `Ok ((`Eof | `Alert _), _, `Data None) ->
+        Ofetch.debug "EOF or ALERT with NO data\n%!";
+        Error 0
+      | `Fail (msg, _) ->
+        (* ignore response, kill connection *)
+        Ofetch.debug "TLS FAIL: %s\n%!" (Tls.Engine.string_of_failure msg);
+        Error 0
+      | `Ok (`Ok state, `Response resp, `Data recvd) ->
           (* set new [state], send [resp], recv [data] *)
-          begin match recvd with
-            | None -> 0
-            | Some recvd_data -> Cstruct.len recvd_data
-          end,
-          begin match resp with
-            | Some resp_data ->
-              HTTPS { state; underlying_t ;
-                wire_send_queue =
-                  (Cstruct.to_bytes resp_data)::fd.wire_send_queue
-              }
-            | None -> HTTPS {fd with state; underlying_t }
-          end
+          Ok (begin match recvd with
+              | None -> Ofetch.debug "recvd len 0\n%!"; 0
+              | Some recvd_data ->
+                let recvd_len = Cstruct.len recvd_data in
+                Cstruct.blit_to_bytes recvd_data 0 buf 0 recvd_len ;
+                Ofetch.debug "received from upstream: %d: %S\n%!"
+                  recvd_len (Bytes.sub_string buf 0 recvd_len);
+                recvd_len
+            end,
+              TLS { state; underlying_t ;
+                      wire_send_queue = fd.wire_send_queue @ match resp with
+                        | Some resp_data when Cstruct.len resp_data <> 0 ->
+                          [Cstruct.to_string resp_data]
+                        | Some _ | None -> []
+                    })
       end
 
-    let recv_peer tt ~buf ~pos ~len =
+    let recv_peer (tt:t) ~(buf:bytes) ~pos ~len
+      : (int * Underlying.t tt,int) result=
       match tt with
-      | HTTPS fd -> recv_peer_tls_t fd ~buf ~pos ~len
-      | HTTP fd -> begin match Underlying.recv_peer fd ~buf ~pos ~len with
-          | rlen, nfd -> rlen, HTTP nfd
-          end
+      | TLS fd ->
+        Ofetch.debug "Ofetch.recv_peer getting TLS stream\n%!";
+        recv_peer_tls_t fd ~buf ~pos ~len
+      | Passthru fd ->
+        Ofetch.debug "Ofetch.recv_peer getting some Passthru data\n%!";
+        begin match Underlying.recv_peer fd ~buf ~pos ~len with
+          | Ok (rlen, nfd) -> Ok (rlen, Passthru nfd)
+          | Error _ as err -> err
+        end
 
     let write_peer_tls_t (t) ~buf ~pos ~len =
-      let sendlist =
-        Cstruct.of_string (if pos = 0 && len = String.length buf
-                           then buf
-                           else String.sub buf pos len)
-      in
-      begin match Tls.Engine.send_application_data t.state [sendlist] with
+      let no_more, t = pop_queued t in
+      if no_more || len = 0 then
+        0, t
+      else begin
+        let to_send = Cstruct.of_string ~off:pos ~len buf in
+        match Tls.Engine.send_application_data t.state [to_send] with
         | None -> failwith "TODO trying to send to invalid state"
         | Some (state, to_send) ->
+          let to_send = Cstruct.to_string to_send in
+          let written_len, underlying_t =
+            Underlying.write_peer t.underlying_t ~pos:0 ~buf:to_send
+              ~len:(String.length to_send)
+          in
           len,
-          { t with
-            state ;
-            wire_send_queue = (Cstruct.to_bytes to_send)::t.wire_send_queue; }
+          { state; underlying_t;
+            wire_send_queue =
+              (if written_len <> String.length to_send then
+                 [String.sub to_send (pos+written_len) (len-written_len)
+                 ] else [])
+              @ t.wire_send_queue
+              @ [String.sub buf pos len]
+          }
       end
 
     let write_peer t ~buf ~pos ~len =
       match t with
-      | HTTP fd -> begin match Underlying.write_peer fd ~buf ~pos ~len with
-          | rlen, nfd -> rlen, HTTP nfd
+      | Passthru fd -> begin match Underlying.write_peer fd ~buf ~pos ~len with
+          | rlen, nfd -> rlen, Passthru nfd
         end
-      | HTTPS fd ->
+      | TLS fd ->
+        Ofetch.debug "Ofetch_tls.write_peer writing %S\n%!"
+          (String.sub buf pos len);
         let wlen, nfd = write_peer_tls_t fd ~buf ~pos ~len in
-        wlen, HTTPS nfd
+        wlen, TLS nfd
 end

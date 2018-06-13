@@ -21,6 +21,7 @@
 module type Peer_S =
 sig
   type t
+
   type init_data
 
   val init : protocol:string -> init_data -> (t, string) result
@@ -30,8 +31,8 @@ sig
      are not to be read/written (use exceptfds for this?)
   *)
 
-  val recv_peer : t -> buf:bytes -> pos:int -> len:int -> int * t
-  (* TODO should be changed to allow error handling*)
+  val recv_peer : t -> buf:bytes -> pos:int -> len:int ->
+    (int * t, int) result
 
   val write_peer : t -> buf:string -> pos:int -> len:int -> int * t
   (* write a substring to a peer (or buffer it).
@@ -58,13 +59,16 @@ type download_state =
   | Reading_body of response_transfer_method
   | Done
 
-let (>>=) a b = (* Rresult.(>>=) *)
-  match a with
-  | Ok x -> b x
-  | Error _ as err -> err
+module Results = struct
+  let (>>=) a b = (* Rresult.(>>=) *)
+    match a with
+    | Ok x -> b x
+    | Error _ as err -> err
 
-let (>>|) a b = (* Rresult.(>>|) *)
-  a >>= (fun x -> Ok (b x))
+  let (>>|) a b = (* Rresult.(>>|) *)
+    a >>= (fun x -> Ok (b x))
+end
+open Results
 
 let res_assert msg = function | true -> Ok ()
                               | false -> Error ("assertion failed: " ^ msg)
@@ -163,10 +167,25 @@ let fetch_request
            - 412 (Precondition Failed)
       *)
   in
+  let terminate = Ok ({req with write_cb = None}, None) in
   debug "sending request to peer.\n%!";
-  res_assert "unable to send HTTP request"
-    (String.length buf = write_peer buf 0 (String.length buf)
-    ) >>| fun () -> {req with write_cb = None}, None
+  let rec write_remaining offset _ : 'handle data_cb_return =
+    let missing_len = (String.length buf - offset) in
+    if missing_len = 0 then begin
+      debug "we sent our payload\n%!";
+      terminate
+    end else begin
+      let written = write_peer buf offset missing_len in
+      debug "written: off:%d written:%d (missing:%d): %S\n%!"
+        offset written missing_len
+        (String.sub buf offset missing_len);
+      if missing_len <> written then
+        Ok ({req with write_cb =
+                        Some (write_remaining (written))}, None)
+      else
+        terminate end
+  in
+  write_remaining 0 req
 
 
 type content_range =
@@ -258,7 +277,9 @@ let parse_headers str =
   | None, None -> Ok Version_1_0 (* default to just looking for \r\n\rn *)
   | _ -> Error "unable to parse headers; found multiple incompatible encodings"
 
-let fetch_download ~write_local ~recv_peer
+let fetch_download ~write_local
+    ~(recv_peer: Bytes.t -> int -> int ->
+      (int, int) result)
     ( { buf ; headers; header_off; chunked_buf ; saved_bytes ;
         state ; read_cb = _ ;
         buflen ; write_cb = _ ; io : 'handle = _ (*TODO*)
@@ -285,7 +306,8 @@ let fetch_download ~write_local ~recv_peer
     : (download_state * int option, string) result=
     res_assert "not enough space for headers"
       (!header_off + len < buflen) >>= fun () ->
-    Bytes.blit buf buf_offset headers !header_off len ;
+    Bytes.blit buf buf_offset headers !header_off
+      (min (Bytes.length buf - !header_off) (len)) ;
     (*substr_equal ~off:0 "HTTP/1.1 200" buf TODO for normal stuff*)
     (*substr_equal ~off:0 "HTTP/1.1 206" buf TODO for partial/Range:*)
     let old_header_off = !header_off in
@@ -311,6 +333,8 @@ let fetch_download ~write_local ~recv_peer
         Ok (Reading_body parsed_headers, Some body_offset)
       (* ^-- we deliberately don't use fst_unless_equal
              here because a 0-length body is allowed. *)
+      | None when !header_off = Bytes.length headers ->
+        Error "not enough space for headers"
       | None ->
         Ok (Reading_headers, None) (* still no consecutive newlines found *)
     end
@@ -408,7 +432,7 @@ let fetch_download ~write_local ~recv_peer
   let rec read_and_handle_bytes state (buf_offset:int) n =
     match state, n with
     | Done , _ -> Ok Done (* TODO ignore extraneous stuff? *)
-    | _,  0 -> Error "unexpected end of stream"
+    | same_state,  0 -> Ok same_state
     | Reading_headers, len ->
       state_reading_headers ~buf_offset len >>= begin function
         | Done, None -> Ok Done
@@ -426,12 +450,26 @@ let fetch_download ~write_local ~recv_peer
           (read_and_handle_bytes[@tailcall]) state new_offset n
       end
   in
-  let len_read = recv_peer buf 0 buflen in
-  read_and_handle_bytes state 0 len_read >>| begin function
-    | Done -> {request with state = Done; read_cb = None }, None
-    | ( Reading_headers
-      | Reading_body _) as new_state ->
-      { request with state = new_state} , None
+  begin match recv_peer buf 0 buflen with
+    | Error 0 -> debug "got ERROR 0\n%!";
+      Error "Error, read 0 bytes."
+    | Error len_read ->
+      debug "got error XXX %d\n%!" len_read ;
+      begin match read_and_handle_bytes state 0 len_read with
+        | Ok Done -> Ok ({request with state = Done; read_cb = None }, None)
+        | Ok Reading_headers ->
+          Error "Unexpected end of HTTP stream while reading headers"
+        | Ok Reading_body _ ->
+          Error "Unexpected end of HTTP stream while reading body content"
+        | Error msg -> Error ("Got EOF|ALERT and triggered error: " ^ msg)
+        end
+    | Ok len_read ->
+      read_and_handle_bytes state 0 len_read >>| begin function
+        | Done -> {request with state = Done; read_cb = None }, None
+        | ( Reading_headers
+          | Reading_body _) as new_state ->
+          { request with state = new_state} , None
+      end
   end
 
 let new_request ~connection_handle ~buflen ~write_local
@@ -481,7 +519,7 @@ let fetch_select (type fd)
   let rec select_loop ~(requests:fd request list) =
     debug "at select_loop with %d requests\n%!" @@ List.length requests ;
     let map_if_some ~default f = function None -> default | Some v -> f v in
-    let readable , writeable, exceptfds =
+    let readable , writeable, _exceptfds =
       let fold f =
         List.fold_left (fun acc r ->
             if f r <> None then r.io::acc else acc) [] requests in
@@ -528,7 +566,7 @@ let fetch_select (type fd)
       (List.length errors) (List.length requests) (List.length live_requests)
       (List.length completed) (List.length failed)
     ;
-    List.iter (fun err -> Printf.eprintf "request error: %s\n%!" err) errors ;
+    List.iter (fun err -> debug "request error: %s\n%!" err) errors ;
     (* TODO expose errors in return code *)
     if [] <> live_requests
     then (select_loop[@tailcall]) ~requests:live_requests
@@ -538,7 +576,7 @@ let fetch_select (type fd)
   debug "STARTING MAIN LOOP WITH %d requests\n%!" @@ List.length requests ;
   select_loop ~requests
 
-let urlparse str =
+let urlparse orig_str =
   let parse_port str off len =
     begin match int_of_string String.(sub str off len) with
       | exception (Failure _) -> Error "urlparse: invalid port"
@@ -548,46 +586,51 @@ let urlparse str =
     end
   in
   (* NOTE this is by no means a full implementation of RFC 2396 *)
-  Ok (String.split_on_char '#' str |> List.hd) >>= fun str ->
-  begin match substr_equal ~off:0 (Bytes.of_string str) "https://",
-              substr_equal ~off:0 (Bytes.of_string str) "http://" with
-  | true, _-> Ok "https"
-  | _, true -> Ok "http"
+  let url = String.split_on_char '#' orig_str |> List.hd in
+  begin match substr_equal ~off:0 (Bytes.of_string url) "https://",
+              substr_equal ~off:0 (Bytes.of_string url) "http://" with
+  | true, _->  Ok (8 (* "https://" *), "tls", 443)
+  | _, true -> Ok (7 (* "http://"  *), "tcp", 80)
   | false, false -> Error "unknown protocol in URL"
   end
-  >>= fun protocol ->
-  res_assert "empty URL" ((String.length protocol + 3) < String.length str)
+  >>= fun (protocol_offset, protocol, default_port) ->
+  res_assert "empty URL" (protocol_offset < String.length url)
   >>= fun () ->
-  let str = ( let prot_len = String.length protocol + 3 in
-              String.sub str prot_len (String.length str - prot_len) ) in
+  let host_port_uri =
+    let s = ( String.sub url protocol_offset
+                (String.length url - protocol_offset) ) in
+    if not (String.contains s '/') then String.concat "/" [s;""] else s in
   (* carve out hostname and port:*)
-  begin match String.index str '/' with
+  begin
+    match String.index host_port_uri '/' with
   | exception Not_found -> Error "no / in URL"
-  | first_slash when str.[0] = '[' -> (* RFC 2732-style IPv6 address:*)
-    begin match String.index_from str 1 ']' with
+  | first_slash when host_port_uri.[0] = '[' ->
+    (* RFC 2732-style IPv6 address:*)
+    begin match String.index_from host_port_uri 1 ']' with
       | exception Not_found -> Error "No end-brace ']' in IPv6 URL"
       | x when x > first_slash -> Error "Invalid IPv6 URL, contains / inside []"
       | v6_end ->
-        let host = String.sub str (0+1) (v6_end-(0+1)) in
+        let host = String.sub host_port_uri (0+1) (v6_end-(0+1)) in
         (if first_slash - v6_end <= 1 (* empty or just colon *)
-         then Ok 80
-         else if str.[v6_end+1] == ':'
+         then Ok default_port
+         else if host_port_uri.[v6_end+1] = ':'
          then
-           parse_port str (v6_end+2) (first_slash-v6_end-2)
+           parse_port host_port_uri (v6_end+2) (first_slash-v6_end-2)
          else Error "parsing port"
         ) >>| fun port -> first_slash, host, port
     end
   | first_slash ->
-    begin match String.(sub str 0 first_slash |> split_on_char ':') with
+    begin match String.(sub host_port_uri 0 first_slash
+                        |> split_on_char ':') with
       | host::port::[] ->
         parse_port port 0 String.(length port) >>|
         fun port -> first_slash, host, port
-      | [host] -> Ok (first_slash, host, 80)
-      | _ -> Error ("wtf is this host:port tuple" ^ str)
+      | [host] -> Ok (first_slash, host, default_port)
+      | _ -> Error ("wtf is this host:port tuple" ^ host_port_uri)
     end
   end
   >>= fun (slash, host, port) ->
   if host = "" then Error "empty hostname"
       else Ok
           (protocol, host, port,
-           String.sub str slash (String.length str - slash))
+           String.sub host_port_uri slash (String.length host_port_uri - slash))

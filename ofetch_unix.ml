@@ -11,8 +11,8 @@ let rec retry_signals f =
   match f () with
   | exception Unix_error ((EAGAIN | EINTR), _ , _ ) ->
     retry_signals f
-  | exception Unix_error (ECONNRESET, _, _ ) -> failwith "econnresetyo"
-  | exception Unix_error (ECONNREFUSED, _, _ ) -> failwith "econnrefused"
+  | exception Unix_error (ECONNRESET, _, _ ) -> failwith "ECONNRESET"
+  | exception Unix_error (ECONNREFUSED, _, _ ) -> failwith "ECONNREFUSED"
   | ok -> ok
 
 let select
@@ -28,8 +28,13 @@ let select
   let read = List.map (fun r -> r.peer_fd) read_handles in
   let write = List.map (fun r -> r.peer_fd) write_handles in
   let except = List.map (fun r -> r.peer_fd) except_handles in
+  Ofetch.debug "Ofetch_unix: select: read %d write %d except %d\n%!"
+    (List.length read) (List.length write) (List.length except);
+  if [] = read && [] = write && [] = except then
+    [], [], []
+  else
   match retry_signals
-          (fun () -> UnixLabels.select ~read ~write ~except ~timeout:45.0)
+          (fun () -> UnixLabels.select ~read ~write ~except ~timeout:30.0)
   with
   | r, w, e ->
     let get_handle needle haystack =
@@ -41,14 +46,18 @@ let select
     (handles_of_peer_fds e except_handles)
 
 let recv_peer t ~buf ~pos ~len =
-  UnixLabels.read t.peer_fd ~buf ~pos ~len, t
+  match UnixLabels.read t.peer_fd ~buf ~pos ~len with
+  | 0 -> Error 0
+  | amount_read -> Ok (amount_read, t)
+
 let write_peer t ~buf ~pos ~len =
   Unix.write_substring t.peer_fd buf pos len, t
 
-let init ~protocol ((inet_addr, port) : init_data) =
-  if protocol <> "http"
-  then Error "unix http-only transport does not support your protocol" (*TODO*)
+let init ~(protocol:string) ((inet_addr, port) : init_data) =
+  if protocol <> "tcp" then
+    Error ("Unsupported protocol: %S" ^ String.escaped protocol)
   else
+  let _ = protocol in
   (* not using UnixLabels here since 4.05 introduces new args: *)
   let peer_fd = Unix.(socket PF_INET SOCK_STREAM 0) in
   let open UnixLabels in

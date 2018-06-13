@@ -1,10 +1,10 @@
 env:
   global:
     - PACKAGE="ofetch"
+    - OPAM_VERSION=2.0.0
   matrix:
-    - OCAML_VERSION=4.04
-    - OCAML_VERSION=4.05
     - OCAML_VERSION=4.06
+    - OCAML_VERSION=4.07
 os:
   - linux
   - osx
