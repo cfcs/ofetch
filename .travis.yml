@@ -4,7 +4,9 @@ env:
     - OPAM_VERSION=2.0.0
   matrix:
     - OCAML_VERSION=4.06
+    - OCAML_VERSION=4.06 DEPOPTS=tls
     - OCAML_VERSION=4.07
+    - OCAML_VERSION=4.07 DEPOPTS=tls
 os:
   - linux
   - osx

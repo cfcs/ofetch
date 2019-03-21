@@ -80,18 +80,18 @@ let qcheck_urlparse =
        (ignore @@ urlparse ("http://example.com" ^ str) ; true) &&
        (* domains: *)
        (match urlparse ("http://example.com/" ^ str) with
-        | Ok ("http", "example.com", 80, _) -> true
+        | Ok ("tcp", "example.com", 80, _) -> true
         | _ -> false) &&
        (* IPv6: *)
        (match urlparse ("http://[2600::aaaa]/" ^ str) with
-        | Ok ("http", "2600::aaaa", _, _) -> true
+        | Ok ("tcp", "2600::aaaa", 80, _) -> true
         | _ -> false) &&
        (match urlparse ("http://[2600::aaaa]:81/x" ^ str) with
-        | Ok ("http", "2600::aaaa", 81, _) -> true
+        | Ok ("tcp", "2600::aaaa", 81, _) -> true
         | _ -> false) &&
        (match urlparse ("http://[2600::aaaa]:"^(string_of_int port)
                         ^ "/" ^ str) with
-       | Ok ("http", "2600::aaaa", p_port, _) when p_port = port -> true
+       | Ok ("tcp", "2600::aaaa", p_port, _) when p_port = port -> true
        | _ -> false) &&
        (match urlparse ("http://[:/" ^ str) with
         | Error "Invalid IPv6 URL, contains / inside []" ->
@@ -106,7 +106,7 @@ let qcheck_urlparse =
        (* ports: *)
        (match urlparse ("http://example.com:" ^ (string_of_int port)
                         ^ "/" ^ str) with
-       | Ok ("http", "example.com", parsed_port, _)
+       | Ok ("tcp", "example.com", parsed_port, _)
          when port = parsed_port -> true
        | _ -> false)
     )
@@ -114,11 +114,16 @@ let qcheck_urlparse =
 let qcheck_substr_equal_exn =
   QCheck.Test.make ~count:30000
     ~name:"quickcheck_substr_equal"
-    QCheck.(quad int string int string)
+    QCheck.(quad small_int small_string small_int small_string)
     (fun (off, haystack, len, needle) ->
-       ignore @@ substr_equal ~off (Bytes.unsafe_of_string haystack)
-         ~len needle ;
-       true
+       match substr_equal ~off (Bytes.unsafe_of_string haystack)
+               ~len needle with
+       | false when len < String.length needle -> true
+       | false when off < 0 || off >= String.length haystack -> true
+       | false when off + String.length needle > String.length haystack -> true
+       | true when String.sub haystack off (min len @@ String.length needle)<> needle -> false
+       | false when String.sub haystack off (String.length needle) <> needle-> true
+       | x -> x
     )
 
 let qcheck_chunked_length =
@@ -142,4 +147,4 @@ let qcheck_tests : QCheck.Test.t list =
 
 let () =
   Alcotest.run ~and_exit:false "ofetch test suite" ["Ofetch.", tests] ;
-  ignore @@ QCheck_runner.run_tests ~colors:true qcheck_tests
+  exit (QCheck_runner.run_tests ~colors:true qcheck_tests)

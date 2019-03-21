@@ -74,12 +74,18 @@ let res_assert msg = function | true -> Ok ()
                               | false -> Error ("assertion failed: " ^ msg)
 
 let substr_equal ?(off=0) (haystack:bytes) ?(len=Bytes.length haystack) needle =
-  let effective_len = (min len @@ Bytes.length haystack) in
-  if off < 0 || len < 0 || min (len - off) (String.length needle) <= 0
-  then false else
-  if max 1 @@ (max 0 off) + (max 1 @@ String.length needle) > effective_len
-  then false
-  else Bytes.sub_string haystack off (String.length needle) = needle
+  (* true if the substring of [haystack] starting at [off]
+     matches [needle]. [len] is used to limit size of [needle].*)
+  if off < 0 || len < 0 then false else
+  let needle_len = String.length needle in
+  let effective_len = (min len @@ Bytes.length haystack - off) in
+  if effective_len < needle_len then false else
+    let rec loop n acc =
+         if n < 0 then acc
+         else begin if Bytes.get haystack (off+n) = needle.[n] then
+             loop (pred n) acc
+           else false end
+    in loop (pred needle_len) true
 
 let index_substr ?(off=0) haystack ?(len=Bytes.length haystack) substr
   : int option =

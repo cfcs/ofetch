@@ -1,4 +1,12 @@
 opam-version: "2.0"
+synopsis: "HTTP client lib and unix utility using only the standard library"
+description:
+  """HTTP client library and unix utility relying solely on the OCaml
+     standard library. If the `tls` package is installed, support
+     for HTTPS will additionally be compiled in.
+     The library uses asynchronous I/O, and the HTTP stack is
+     independent of the effectful layer, an implementation is
+     provided for Unix."""
 maintainer: "root@localhost"
 authors: [ "cfcs" ]
 license: "ISC"
@@ -16,8 +24,10 @@ install: [ # TODO this doesn't seem to be triggered by opam:
 ]
 
 depends: [
-  "ocaml-version" { >= "4.04.2" & os != "windows" }
+  "ocaml"     { >= "4.04.2" & os != "windows" }
   "ocamlfind"
-  "alcotest"  {test}
-  "qcheck"    {test}
+  "alcotest"  {with-test}
+  "qcheck"    {with-test}
 ]
+
+depopts: [ "tls" ]

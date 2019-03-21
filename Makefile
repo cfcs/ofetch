@@ -49,7 +49,7 @@ test: builddir lib ofetch.ml tests.ml
 		./tests && echo "tests ran, all good"
 
 install: cli
-	cd _build && cp ofetch $(PREFIX)/ofetch
+	cd _build && cp ofetch $(PREFIX)/bin/ofetch
 
 debug: builddir ofetch.ml
 	cd _build/ && \
