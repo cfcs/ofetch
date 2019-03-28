@@ -25,11 +25,11 @@ let select
      TODO if -1 == uerror("select", Nothing);
      TODO how to handle timeout?
   *)
-  let read = List.map (fun r -> r.peer_fd) read_handles in
-  let write = List.map (fun r -> r.peer_fd) write_handles in
-  let except = List.map (fun r -> r.peer_fd) except_handles in
-  Ofetch.debug "Ofetch_unix: select: read %d write %d except %d\n%!"
-    (List.length read) (List.length write) (List.length except);
+  let read = List.rev_map (fun r -> r.peer_fd) read_handles in
+  let write = List.rev_map (fun r -> r.peer_fd) write_handles in
+  let except = List.rev_map (fun r -> r.peer_fd) except_handles in
+  Ofetch.debug (fun m -> m"Ofetch_unix: select: read %d write %d except %d\n%!"
+                   (List.length read) (List.length write) (List.length except));
   if [] = read && [] = write && [] = except then
     [], [], []
   else
@@ -40,7 +40,7 @@ let select
     let get_handle needle haystack =
       List.find (fun {peer_fd ; _ } -> peer_fd = needle) haystack in
     let handles_of_peer_fds fds haystack =
-      List.map (fun fd -> get_handle fd haystack) fds in
+      List.rev_map (fun fd -> get_handle fd haystack) fds in
     (handles_of_peer_fds r read_handles),
     (handles_of_peer_fds w write_handles),
     (handles_of_peer_fds e except_handles)

@@ -63,11 +63,12 @@ sig
 end
 
 val ofetch_global_debugging : bool ref
-val debug : ?fd:out_channel -> ('a, out_channel, unit) format -> 'a
+val debug : ?fd:out_channel ->
+  ((('a, out_channel, unit) format -> 'a) -> unit) -> unit
 type response_transfer_method =
     Content_length of int
   | Chunked of int
-  | Version_1_0
+  | Version_1_0 of int
 type download_state =
     Reading_headers
   | Reading_body of response_transfer_method
@@ -93,7 +94,6 @@ and 'io data_cb = 'io request -> 'io data_cb_return
 and 'io request = {
   io : 'io;
   buf : Bytes.t;
-  buflen : int;
   headers : Bytes.t;
   header_off : int ref;
   chunked_buf : ChunkedLength.t;

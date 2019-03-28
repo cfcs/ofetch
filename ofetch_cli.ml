@@ -94,19 +94,76 @@ let unix_select
      TODO if -1 == uerror("select", Nothing);
      TODO how to handle timeout?
   *)
-  let read = List.map (fun r -> !(r.peer_fd)) read_handles in
-  let write = List.map (fun r -> !(r.peer_fd)) write_handles in
-  let except = List.map (fun r -> !(r.peer_fd)) except_handles in
+  let read = List.rev_map (fun r -> !(r.peer_fd)) read_handles in
+  let write = List.rev_map (fun r -> !(r.peer_fd)) write_handles in
+  let except = List.rev_map (fun r -> !(r.peer_fd)) except_handles in
   match retry_signals (fun () -> Ofetch_wrap.select read write except) with
     | r, w, e ->
       let get_handle needle haystack =
         List.find (fun {peer_fd ; _ } -> Ofetch_wrap.equal !peer_fd needle)
           haystack in
       let handles_of_peer_fds fds haystack =
-        List.map (fun fd -> get_handle fd haystack) fds in
+        List.rev_map (fun fd -> get_handle fd haystack) fds in
       (handles_of_peer_fds r read_handles),
       (handles_of_peer_fds w write_handles),
       (handles_of_peer_fds e except_handles)
+
+module DomainLRU : sig
+  val find_opt : string -> Unix.inet_addr option
+  val add : string -> Unix.inet_addr -> unit
+end = struct
+  let max_lru_entries = 1000
+  module Weight = Map.Make(struct
+      let compare : int -> int -> int = compare
+      type t = int end)
+  module Domains = Map.Make(String)
+  type t = { mutable w : string Weight.t ;
+             mutable d : (Weight.key * Unix.inet_addr) Domains.t ;
+             mutable generation : int ;
+           }
+  let t = { w = Weight.empty ; d = Domains.empty ; generation = 0 }
+  let find_opt domain =
+    match Domains.find_opt domain t.d with
+    | None -> None
+    | Some (old_weight, addr) ->
+      (* update generation/weight to reflect that it was recently used: *)
+      t.generation <- succ t.generation ;
+      t.w <- Weight.remove old_weight t.w ;
+      t.w <- Weight.add t.generation domain t.w ;
+      t.d <- Domains.update domain (fun _ -> Some (t.generation,addr)) t.d ;
+      Some addr
+  let add domain addr =
+    begin match Domains.find_opt domain t.d with
+    | None when Weight.cardinal t.w > max_lru_entries ->
+      (* we're going to add a new domain, but the cache is full,
+         so we evict the least recently used: *)
+        let weight, expired_domain = Weight.min_binding t.w in
+        t.w <- Weight.remove weight t.w ;
+        t.d <- Domains.remove expired_domain t.d
+    | None -> ()
+    | Some (weight, _) ->
+      (* remove old weight since it will be updated with the current
+         generation below. No need to touch Domains, since that will be
+         overriden regardless: *)
+      t.w <- Weight.remove weight t.w
+    end ;
+    t.generation <- succ t.generation ;
+    t.w <- Weight.add t.generation domain t.w ;
+    t.d <- Domains.add domain (t.generation, addr) t.d
+end
+
+let resolve_hostname hostname =
+  match Unix.inet_addr_of_string hostname with
+  | ip -> Ok ip
+  | exception _ ->
+    begin match DomainLRU.find_opt hostname with
+    | Some addr -> Ok addr
+    | None ->
+      begin match (UnixLabels.gethostbyname hostname).Unix.h_addr_list.(0) with
+        | exception _ -> Error ("unable to resolve: " ^ hostname)
+        | addr -> DomainLRU.add hostname addr ; Ok addr
+      end
+    end
 
 let () =
   Printexc.record_backtrace true ; (* TODO *)
@@ -138,16 +195,15 @@ let () =
 
         let open Ofetch in
         urlparse url >>= fun (protocol, hostname, port, uri) ->
-        debug "urlparse: protocol: %s :// %S : %d %S\n%!"
-          protocol hostname port uri;
+        debug (fun m -> m"urlparse: protocol: %s :// %S : %d %S\n%!"
+                  protocol hostname port uri);
 
-        (* let addr = Unix.inet_addr_of_string ip_v4_str in *)
-        let addr = (UnixLabels.gethostbyname hostname).Unix.h_addr_list.(0) in
+        resolve_hostname hostname >>= fun addr ->
 
         mkconn ~protocol
           ~addr ~hostname ~port ~uri ~local_filename
         >>= fun request ->
-        (*mkconn ~addr ~hostname ~port ~uri
+        (*mkconn ~protocol ~addr ~hostname ~port ~uri
           ~local_filename:(local_filename ^ ".2") >>= fun request2 ->*)
         fetch_select ~equal:(fun a b ->
             Ofetch_wrap.equal !(a.peer_fd) !(b.peer_fd))

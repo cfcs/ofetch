@@ -28,7 +28,7 @@ cli: builddir lib ofetch_cli.ml
 		./ofetch_cli.ml -o ./ofetch && \
 	{ { set +x ; } 2> /dev/null ; } && \
 	strip ./ofetch && \
-	ls -lh ./ofetch
+	cd ../ && ls -lh ./_build/ofetch
 
 builddir: *.ml
 	@ mkdir -p _build/ && \
@@ -96,7 +96,7 @@ network-test: cli ./_build/ofetch
 	  @ # this one reports Accept-Ranges: bytes:
 	$(call compare_wget,debian-sha256,"http://ftp.nl.debian.org/debian/dists/stretch/main/installer-armhf/current/images/SHA256SUMS")
 	@ # TLS
-	$(call compare_wget,debian-sha256,"https://mirage.io/")
+	$(call compare_wget,mirage-io,"https://mirage.io/")
 	@ # misc
 
 clean:

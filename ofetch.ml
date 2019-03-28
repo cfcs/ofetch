@@ -27,7 +27,7 @@ sig
   val init : protocol:string -> init_data -> (t, string) result
 
   val select : t list -> t list -> t list -> t list * t list * t list
-  (* TODO also need a way to signal state updates, even to fds that
+  (** TODO also need a way to signal state updates, even to fds that
      are not to be read/written (use exceptfds for this?)
   *)
 
@@ -35,24 +35,24 @@ sig
     (int * t, int) result
 
   val write_peer : t -> buf:string -> pos:int -> len:int -> int * t
-  (* write a substring to a peer (or buffer it).
+  (** write a substring to a peer (or buffer it).
      TODO interface should be changed to allow error handling. *)
 
   val equal : t -> t -> bool
-  (* bool: whether the two t operate on the same sockets *)
+  (** bool: whether the two t operate on the same sockets *)
 end
 
 let ofetch_global_debugging = ref false (* <-- print debug messages to stderr *)
 
-let debug ?(fd=stderr) =
+let debug ?(fd=stderr) f : unit =
   if !ofetch_global_debugging
-  then Printf.fprintf fd
-  else Printf.ifprintf fd
+  then f (Printf.fprintf fd)
+  else ()
 
 type response_transfer_method =
   | Content_length of int
   | Chunked of int
-  | Version_1_0
+  | Version_1_0 of int (* number of \r\n\r\n encountered at the end *)
 
 type download_state =
   | Reading_headers
@@ -118,9 +118,8 @@ struct
 
   let add t bytes off len =
     if Buffer.length t + len > 7 then (
-      debug "ChunkedLength.add -> contents: %S\n\t\tadding: %S\n%!"
-        (Buffer.contents t)
-        (Bytes.sub_string bytes off len) ;
+      debug (fun m -> m "ChunkedLength.add -> contents: %S\n\t\tadding: %S\n%!"
+                (Buffer.contents t) (Bytes.sub_string bytes off len)) ;
       Error "Transfer-Encoding: chunked: more than 4 bytes" )
     else
       ( Buffer.add_subbytes t bytes off len ; Ok t )
@@ -128,12 +127,12 @@ struct
   let contains t needle = None <> index_substr (Buffer.to_bytes t) needle
 
   let to_int t =
-    debug "ChunkedLength.to_int %S\n%!" @@ Buffer.contents t;
+    debug (fun m -> m "ChunkedLength.to_int %S\n%!" @@ Buffer.contents t);
     try Ok ( let i = "0x" ^ (Buffer.contents t |> String.trim) |> int_of_string
              in Buffer.clear t ; i )
     with Invalid_argument _ -> Error "ChunkedLength.t contains invalid data"
-
 end
+
 type 'io data_cb_return =
   ('io request (* <-- new state*)
    * (('io request -> 'io request) option)
@@ -144,7 +143,6 @@ and 'io data_cb =
 and 'io request  =
   { io : 'io ;
     buf : Bytes.t ;
-    buflen : int ;
     headers : Bytes.t ;
     header_off : int ref ;
     chunked_buf : ChunkedLength.t ;
@@ -174,17 +172,17 @@ let fetch_request
       *)
   in
   let terminate = Ok ({req with write_cb = None}, None) in
-  debug "sending request to peer.\n%!";
+  debug (fun m -> m"sending request to peer.\n%!");
   let rec write_remaining offset _ : 'handle data_cb_return =
     let missing_len = (String.length buf - offset) in
     if missing_len = 0 then begin
-      debug "we sent our payload\n%!";
+      debug (fun m -> m"we sent our payload\n%!");
       terminate
     end else begin
       let written = write_peer buf offset missing_len in
-      debug "written: off:%d written:%d (missing:%d): %S\n%!"
-        offset written missing_len
-        (String.sub buf offset missing_len);
+      debug (fun m -> m"written: off:%d written:%d (missing:%d): %S\n%!"
+                offset written missing_len
+                (String.sub buf offset missing_len));
       if missing_len <> written then
         Ok ({req with write_cb =
                         Some (write_remaining (written))}, None)
@@ -266,7 +264,7 @@ let parse_headers str =
   (* TODO see test suite*)
   (* TODO consider ETag parsing: https://tools.ietf.org/html/rfc7232#section-2.3*)
   let headers = String.(split_on_char '\n' str
-                        |> List.map (fun x -> trim x |> lowercase_ascii))
+                        |> List.rev_map (fun x -> trim x |> lowercase_ascii))
   in
   let find_header str =
     try Some (List.find (fun x -> substr_equal (Bytes.of_string x) str) headers)
@@ -280,24 +278,23 @@ let parse_headers str =
        Ok (Content_length (int_of_string (String.trim tl)))
       | _ -> Error "TODO handle invalid content-length"
     end
-  | None, None -> Ok Version_1_0 (* default to just looking for \r\n\rn *)
+  | None, None -> Ok (Version_1_0 0) (* default to just looking for \r\n\r\n *)
   | _ -> Error "unable to parse headers; found multiple incompatible encodings"
 
 let fetch_download ~write_local
     ~(recv_peer: Bytes.t -> int -> int ->
       (int, int) result)
     ( { buf ; headers; header_off; chunked_buf ; saved_bytes ;
-        state ; read_cb = _ ;
-        buflen ; write_cb = _ ; io : 'handle = _ (*TODO*)
+        state ; read_cb = _ ; write_cb = _ ; io : 'handle = _ (*TODO*)
       } as request)
   : 'handle data_cb_return =
 
   let save_data ~off chunk_len =
     let written = write_local buf off chunk_len in
     saved_bytes := !saved_bytes + written ;
-    debug "save_data: off %d chunk_len %d written: %d: \
-           \x1b[31m%S\x1b[0m\n%!" (* <-- color data red *)
-      off chunk_len written @@ Bytes.sub_string buf off chunk_len ;
+    debug (fun m -> m"save_data: off %d chunk_len %d written: %d: \
+                      \x1b[31m%S\x1b[0m\n%!" (* <-- color data red *)
+              off chunk_len written @@ Bytes.sub_string buf off chunk_len) ;
     assert(written = chunk_len)
     (* TODO this ought to return true (unless out of quota/disk space) since our
        data files are not opened O_NONBLOCK. that is however an assumption that
@@ -309,32 +306,33 @@ let fetch_download ~write_local
   let fst_unless_equal a b = if a-b <> 0 then Some a else None in
 
   let state_reading_headers ~buf_offset len
-    : (download_state * int option, string) result=
-    res_assert "not enough space for headers"
-      (!header_off + len < buflen) >>= fun () ->
-    Bytes.blit buf buf_offset headers !header_off
-      (min (Bytes.length buf - !header_off) (len)) ;
+    : (download_state * int option, string) result =
+    let actually_consumed = min (Bytes.length headers - !header_off) (len)
+                          |> min (Bytes.length buf - buf_offset) in
+    Bytes.blit buf buf_offset
+      headers !header_off
+      actually_consumed ;
     (*substr_equal ~off:0 "HTTP/1.1 200" buf TODO for normal stuff*)
     (*substr_equal ~off:0 "HTTP/1.1 206" buf TODO for partial/Range:*)
     let old_header_off = !header_off in
-    header_off := old_header_off + len ;
+    header_off := old_header_off + actually_consumed ;
     let two_newlines = "\r\n\r\n" in
     begin match index_substr ~off:(old_header_off-5)
                   ~len:!header_off headers two_newlines
       with
       | Some end_of_headers ->
         let heads = Bytes.sub_string headers 0 end_of_headers in
-        debug "received %d headers [len %d]: %S\n%!"
-          (String.length heads) len heads ;
+        debug (fun m -> m"received %d headers [len %d]: %S\n%!"
+                  (String.length heads) len heads) ;
         parse_headers heads >>= fun parsed_headers ->
         (* compute difference between last offset (!header_off)
            and the end of headers found in that. TODO
         *)
         let body_offset = end_of_headers - old_header_off
                           + String.length two_newlines in
-        debug "cool we're done with headers: \
-               buf_offset: %d len: %d body_offset: %d\n%!"
-          buf_offset len body_offset ;
+        debug (fun m -> m"cool we're done with headers: \
+                          buf_offset: %d len: %d body_offset: %d\n%!"
+                  buf_offset len body_offset) ;
         assert (0 <= body_offset && body_offset <= len);
         Ok (Reading_body parsed_headers, Some body_offset)
       (* ^-- we deliberately don't use fst_unless_equal
@@ -351,23 +349,47 @@ let fetch_download ~write_local
       Ok (Reading_body state, fst_unless_equal offset len)
     in
     function
-    | Version_1_0 as current_state ->
+    | Version_1_0 0 as current_state -> (* looking for stuff at the end *)
       (* TODO consider adding switch to download until end of stream *)
       begin match index_substr ~off buf ~len "\r\n\r\n" with
         | Some i -> (* end of download *)
           save_data ~off (i-off) ;
           Ok (Done, None)
-        | None ->
-          save_data ~off (len-off) ;
+        | None when len - off = 0 ->
           ok_more current_state len
+        | None ->
+          let next =
+            if None <> index_substr ~len ~off:(len-3) buf "\r\n\r" then 3
+            else if None <> index_substr ~len ~off:(len-2) buf "\r\n" then 2
+            else if None <> index_substr ~len ~off:(len-1) buf "\r" then 1
+            else 0 in
+          save_data ~off (len - off - next) ;
+          ok_more (Version_1_0 next) len
+      end
+    | Version_1_0 seen -> (*looking for stuff at the beginning*)
+      let can_see = max 0 (min (len - off) (4-seen)) in
+      let sequence = String.sub "\r\n\r\n" seen can_see in
+      begin match index_substr ~off buf ~len:(off+can_see) sequence with
+        | Some 0 -> Ok (Done, None)
+        | None
+        | Some _ ->
+          (* save_data ~off:0 ~len:String.(seen) "\r\n\r\n" *)
+          ( (* we ignored some \r etc in the previous loop, but now we know
+               that they were actually part of the response body: *)
+            let written = write_local (Bytes.of_string "\r\n\r\n") 0 seen in
+            saved_bytes := !saved_bytes + written ) ;
+          (* skip one character that DIDN'T match and reset state:*)
+          save_data ~off 1 ;
+          ok_more (Version_1_0 0) 1
       end
 
     | Content_length missing_len ->
       let this_slice = min (len-off) missing_len in
       let remaining_of_download = missing_len - this_slice in
-      debug "content-length: this_slice: %d len: %d off: %d missing_len: %d \
-             remaining_of_download(after): %d\n%!"
-        this_slice len off missing_len remaining_of_download ;
+      debug (fun m ->
+          m"content-length: this_slice: %d len: %d off: %d missing_len: %d \
+            remaining_of_download(after): %d\n%!"
+            this_slice len off missing_len remaining_of_download) ;
       save_data ~off (this_slice) ;
       assert (remaining_of_download >= 0) ;
       if remaining_of_download = 0 then
@@ -381,14 +403,15 @@ let fetch_download ~write_local
       begin match index_substr ~off buf ~len "\n" with (*TODO look for \r *)
 
         | None -> (* no newline was found, so we add everything to len buffer:*)
-          debug "Adding everything to chunked_buf\n%!" ;
+          debug (fun m -> m"Adding everything to chunked_buf\n%!") ;
           ChunkedLength.add chunked_buf buf off (len - off) >>= fun _ ->
           ok_more (Chunked 0) len
 
         | Some second_i when ChunkedLength.contains chunked_buf "\n"
                           || !saved_bytes = 0 (* OR if this is the first chunk *)
           -> (*we have found the second \n, so now we parse the chunk length: *)
-          debug "second i: %d saved_bytes: %d\n%!" second_i !saved_bytes ;
+          debug (fun m ->
+              m"second i: %d saved_bytes: %d\n%!" second_i !saved_bytes) ;
           ChunkedLength.(add chunked_buf buf off (second_i - off) >>= to_int)
           >>= begin function
             | 0 -> Ok (* when we *receive* len 0, that's EOF: *)
@@ -402,22 +425,22 @@ let fetch_download ~write_local
               let len_of_marker = len-first_i in
               let new_offset = first_i + len_of_marker in
               assert(len = new_offset) ;
-              debug "Found first newline: off: %d first_i: %d\
-                     len_of_marker: %d new_offset: %d\n%!"
-                off first_i len_of_marker new_offset ;
+              debug (fun m -> m "Found first newline: off: %d first_i: %d\
+                                 len_of_marker: %d new_offset: %d\n%!"
+                        off first_i len_of_marker new_offset) ;
               ChunkedLength.add chunked_buf buf first_i len_of_marker
               >>= fun _ -> ok_more (Chunked 0) new_offset
 
             | Some second_i -> (* second newline found of \r\nXXXX\r\n *)
-              debug "now we have a chunk at off: %d i: %d len: %d\n%!"
-                off second_i len;
+              debug (fun m ->
+                  m"now we have a chunk at off: %d i: %d len: %d\n%!"
+                    off second_i len);
               ChunkedLength.(add chunked_buf buf off (max 0 (second_i-off))
                              >>= to_int) >>= fun chunk_marker ->
               let new_offset = (second_i+1) in (* 1: '\n'*)
-              debug "--FOUND CHUNK MARKER at off %d len: %d: \
-                     chunk_marker: %d new_off: %d\n%!"
-                off len
-                (chunk_marker) new_offset ;
+              debug (fun m -> m"--FOUND CHUNK MARKER at off %d len: %d: \
+                                chunk_marker: %d new_off: %d\n%!"
+                        off len (chunk_marker) new_offset) ;
               if 0 = chunk_marker then begin
                 Ok (Done, None) (* no more content to be read *)
               end else
@@ -428,10 +451,11 @@ let fetch_download ~write_local
     | Chunked chunk_len -> (* We already have a chunk, download data:*)
       let this_chunk = min chunk_len (len-off) in
       let new_offset = (off + this_chunk) in
-      debug "READ CHUNK len: %d off: %d, %d/%d [new_offset: %d]: %S\n%!"
-        len off
-        this_chunk chunk_len
-        new_offset (Bytes.sub_string buf off this_chunk) ;
+      debug (fun m ->
+          m"READ CHUNK len: %d off: %d, %d/%d [new_offset: %d]: %S\n%!"
+            len off
+            this_chunk chunk_len
+            new_offset (Bytes.sub_string buf off this_chunk)) ;
       save_data ~off this_chunk ;
       ok_more (Chunked (chunk_len - this_chunk)) new_offset
   in
@@ -456,11 +480,11 @@ let fetch_download ~write_local
           (read_and_handle_bytes[@tailcall]) state new_offset n
       end
   in
-  begin match recv_peer buf 0 buflen with
-    | Error 0 -> debug "got ERROR 0\n%!";
+  begin match recv_peer buf 0 (Bytes.length buf) with
+    | Error 0 -> debug (fun m -> m"got ERROR 0\n%!");
       Error "Error, read 0 bytes."
     | Error len_read ->
-      debug "got error XXX %d\n%!" len_read ;
+      debug (fun m -> m"got error XXX %d\n%!" len_read) ;
       begin match read_and_handle_bytes state 0 len_read with
         | Ok Done -> Ok ({request with state = Done; read_cb = None }, None)
         | Ok Reading_headers ->
@@ -481,9 +505,8 @@ let fetch_download ~write_local
 let new_request ~connection_handle ~buflen ~write_local
     ~recv_peer ~write_peer ~path ~hostname =
   { io = connection_handle ;
-    buflen ;
-    buf = Bytes.make (buflen + 8192) '\x00' ;
-    headers = Bytes.make (buflen + 8192) '\x00' ;
+    buf = Bytes.make (buflen) '\x00' ;
+    headers = Bytes.make (buflen) '\x00' ;
     header_off = ref 0 ;
     chunked_buf = ChunkedLength.create () ;
 
@@ -523,7 +546,8 @@ let fetch_select (type fd)
       in
       let module FDSet = Set.Make(OrderedFD) in*)
   let rec select_loop ~(requests:fd request list) =
-    debug "at select_loop with %d requests\n%!" @@ List.length requests ;
+    debug (fun m ->
+        m"at select_loop with %d requests\n%!" @@ List.length requests) ;
     let map_if_some ~default f = function None -> default | Some v -> f v in
     let readable , writeable, _exceptfds =
       let fold f =
@@ -556,10 +580,10 @@ let fetch_select (type fd)
     in
     let errors, (inactive, live_requests) =
       let errors, new_states = do_io [] [] requests in
-      let()= assert(List.length errors <= List.length requests) in
-      let() =assert(List.length new_states <= List.length requests) in
+      let()= assert(List.compare_lengths errors requests < 1) in
+      let() =assert(List.compare_lengths new_states requests < 1) in
       errors,
-      List.map (fun old ->
+      List.rev_map (fun old ->
           (* update with new state if applicable: *)
           try List.find (fun n -> equal n.io old.io) new_states
           with Not_found -> old
@@ -567,19 +591,20 @@ let fetch_select (type fd)
       |> List.partition (fun r -> r.read_cb = None && r.write_cb = None)
     in
     let completed, failed = List.partition (fun r -> r.state = Done) inactive in
-    debug "errs: %d initial reqs: %d live requests: %d \
-           completed: %d  failed: %d\n%!"
-      (List.length errors) (List.length requests) (List.length live_requests)
-      (List.length completed) (List.length failed)
-    ;
-    List.iter (fun err -> debug "request error: %s\n%!" err) errors ;
+    debug (fun m ->
+        m"errs: %d initial reqs: %d live requests: %d \
+          completed: %d  failed: %d\n%!"
+          (List.length errors) (List.length requests)
+          (List.length live_requests)
+          (List.length completed) (List.length failed)) ;
+    List.iter (fun err -> debug (fun m ->m"request error: %s\n%!" err)) errors ;
     (* TODO expose errors in return code *)
     if [] <> live_requests
     then (select_loop[@tailcall]) ~requests:live_requests
-    else (if [] = errors then Ok (debug "all good\n")
+    else (if [] = errors then Ok (debug (fun m -> m"Finishing main loop\n"))
           else Error "exiting with errors")
   in
-  debug "STARTING MAIN LOOP WITH %d requests\n%!" @@ List.length requests ;
+  debug (fun m -> m"MAIN LOOP WITH %d requests\n%!" @@ List.length requests) ;
   select_loop ~requests
 
 let urlparse orig_str =

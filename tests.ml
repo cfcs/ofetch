@@ -54,12 +54,92 @@ let test_parse_content_range () : unit =
    need to request a later part earlier.""
   *) (*NB: ofetch doesn't implement multiple ranges per request/response.*)
 
+let test_header_parsing () =
+  (* ensures that reads of exactly buffer size are accepted, and that we
+     finish parsing the headers .*)
+  let mock_response, expected_body_size =
+    let headers = "200 OK\r\nHost: yo\r\nMock: x\r\n\r\n" in
+    let body = String.(make (8192 - 4- length headers)) 'a' in
+    headers ^ body ^ "\r\n\r\n", String.length body in
+  let written_body_size = ref 0 in
+  let write_local _ _ len = written_body_size := !written_body_size + len ; len in
+  let recv_peer buf off len =
+    let actual = min len @@ String.length mock_response in
+    Bytes.blit_string mock_response off buf off actual ;
+    Ok actual in
+  let write_peer _buf _off len = len in
+  Printexc.record_backtrace true;
+  Ofetch.ofetch_global_debugging := true;
+  let rec loop counter state =
+    match Ofetch.fetch_download ~write_local ~recv_peer state with
+    | Ok ({ state = Done ; _}, None) -> ()
+    | Ok (req, None) when counter < 10000 -> loop (succ counter) req
+    | Ok _ -> failwith "too many loops or request rescheduled"
+    | Error s -> failwith s ;
+  in
+  let req : unit Ofetch.request =
+    Ofetch.new_request ~connection_handle:() ~buflen:8192
+      ~write_local ~recv_peer ~write_peer ~path:"/" ~hostname:"yo" in
+  loop 1 req ;
+  assert (!written_body_size = expected_body_size) ;
+  Ofetch.ofetch_global_debugging := false
+
+let qcheck_parse_headers =
+(*  Printexc.record_backtrace true;*)
+  QCheck.Test.make ~count:10000
+    ~name:"quickcheck_parse_headers"
+    QCheck.(quad (int_range 0 16400) (int_range 1 3000) (int_range 1 3000) (int_range 128 16384))
+    (fun (a_size, read_size, write_size, buflen) ->
+       let mock_response, expected_body_size =
+         let headers = "200 OK\r\nHost: yo\r\nMock: x\r\n\r\ne" in
+         let body = String.(make (a_size)) 'a' in
+         headers ^ body ^ "o\r\n\r\n", String.length body+2 in
+       let written_body_size = ref 0 in
+       let consumed_bytes = ref 0 in
+       let write_local _buf _off len =
+         (*Printf.printf "writing local: %d: %S\n%!" len (Bytes.sub_string buf off len);*)
+         written_body_size := !written_body_size + len ; len in
+       let recv_peer buf off len =
+         let actual = min len @@
+           (String.length mock_response - !consumed_bytes)
+                    |> min read_size in
+         Bytes.blit_string mock_response (!consumed_bytes) buf off actual ;
+         consumed_bytes := !consumed_bytes + actual ;
+         Ok actual in
+       let write_peer _buf _off len = min len write_size in
+       let rec loop counter state =
+         Ofetch.ofetch_global_debugging := false ;
+         match Ofetch.fetch_download ~write_local ~recv_peer state with
+         | Ok (_, Some _) -> failwith "FUCK CALLBACK"
+         | Ok ({ state = Done ; saved_bytes ; _ }, None) ->
+           if !written_body_size = expected_body_size then true
+           else (
+             Printf.printf "%d <> %d <> %d <> !saved:%d\n"
+               !written_body_size expected_body_size a_size !saved_bytes;
+             false )
+         | Ok (req, None) when counter < 30000 ->
+           loop (succ counter) req
+         | Ok _ when counter = 30000 ->
+           Printf.printf "looped 30k times fuck this\n%!"; false
+         | Ok _ ->
+           Printf.printf "OK SOMETHING ELSE\n%!"; ignore@@failwith "other ok";false
+         | Error s -> Printf.printf "ERROR: %S\n%!" s ; failwith s
+       in
+       (*Printf.printf "--new REQUEST-- %d\n%!" a_size;*)
+       let req : unit Ofetch.request =
+         Ofetch.new_request ~connection_handle:() ~buflen
+           ~write_local ~recv_peer ~write_peer ~path:"/" ~hostname:"yo" in
+       loop 1 req
+    ) |> fun x ->
+  Ofetch.ofetch_global_debugging := false ; x
+
 let tests =
-  [ "parse_content_range", `Quick, test_parse_content_range
+  [ "parse_content_range", `Quick, test_parse_content_range ;
+    "header parsing", `Quick, test_header_parsing ;
   ]
 
 let qcheck_parse_content_range =
-  QCheck.Test.make ~count:30000
+  QCheck.Test.make ~count:3000
     ~name:"quickcheck_parse_content_range"
     QCheck.(triple string string string)
     (fun (str1,str2,str3) ->
@@ -70,7 +150,7 @@ let qcheck_parse_content_range =
     )
 
 let qcheck_urlparse =
-  QCheck.Test.make ~count:30000
+  QCheck.Test.make ~count:3000
     ~name:"quickcheck_urlparse"
     QCheck.(pair string small_int)
     (fun (str, port) ->
@@ -142,7 +222,8 @@ let qcheck_tests : QCheck.Test.t list =
   [ qcheck_parse_content_range ;
     qcheck_urlparse ;
     qcheck_substr_equal_exn ;
-    qcheck_chunked_length
+    qcheck_chunked_length ;
+    qcheck_parse_headers ;
   ]
 
 let () =

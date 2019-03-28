@@ -37,7 +37,7 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
       | hd::tl ->
         true,
         let len = String.length hd in
-        Ofetch.debug "GOING TO WRITE %d\n%!" len ;
+        Ofetch.debug (fun m -> m"TLS: GOING TO WRITE %d\n%!" len) ;
         begin match Underlying.write_peer t.underlying_t
                       ~buf:hd ~pos:0 ~len
           with
@@ -75,30 +75,32 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
     let select (readable:Underlying.t tt list) (writeable:Underlying.t tt list)
         (except:Underlying.t tt list)
       : Underlying.t tt list * Underlying.t tt list * Underlying.t tt list =
-      let to_u = List.map (function
+      let to_u = List.rev_map (function
           | Passthru fd -> fd
           | TLS t -> t.underlying_t) in
 
-      Ofetch.debug "OK COOL SELECT %d %d %d\n"
-        (List.length readable) (List.length writeable) (List.length except);
+      Ofetch.debug (fun m -> m"TLS: SELECT %d %d %d\n"
+                       (List.length readable) (List.length writeable)
+                       (List.length except) );
       let u_w, _ = List.partition (function
           | Passthru _ -> true | TLS t ->
             let x = tls_is_writeable t and y = tls_needs_write_from_queue t in
-            Ofetch.debug "is writeable: %b needs writes from queue: %b\n%!" x y;
+            Ofetch.debug (fun m ->
+                m"TLS: is writeable: %b needs writes from queue: %b\n%!" x y);
             x || y) writeable in
       let u_r, u_w, u_e =
         Underlying.select (to_u readable) (to_u u_w) (to_u except)
       in
       (let l = List.length in
-       Ofetch.debug "HTTP(S?): %d %d %d\n"
-         (l readable) (l writeable) (l except));
-      List.map (fun ut -> List.find (function
+       Ofetch.debug (fun m -> m"HTTP(S?): %d %d %d\n"
+                        (l readable) (l writeable) (l except)));
+      List.rev_map (fun ut -> List.find (function
           | Passthru xxx -> Underlying.equal ut xxx
           | TLS xxx -> Underlying.equal ut xxx.underlying_t) readable) u_r,
-      List.map (fun ut -> List.find (function
+      List.rev_map (fun ut -> List.find (function
           | Passthru xxx -> Underlying.equal ut xxx
           | TLS xxx -> Underlying.equal ut xxx.underlying_t) writeable) u_w,
-      List.map (fun ut -> List.find (function
+      List.rev_map (fun ut -> List.find (function
           | Passthru xxx -> Underlying.equal ut xxx
           | TLS xxx -> Underlying.equal ut xxx.underlying_t) except) u_e
 
@@ -123,12 +125,12 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
 
     let recv_peer_tls_t (fd: 'a tls_t) ~buf ~(pos:int) ~(len:int)
       : (int * t, int) result =
-      Ofetch.debug "reading TLS from underlying\n%!";
+      Ofetch.debug (fun m -> m"TLS: reading from underlying\n%!");
       let underlying_buf = Bytes.init len (fun _ -> '\x00') in
       Underlying.recv_peer fd.underlying_t ~buf:underlying_buf ~pos ~len
       >>= fun (len_ret, underlying_t) ->
-      Ofetch.debug "received: %S\n%!"
-        (Bytes.sub_string underlying_buf 0 len_ret);
+      Ofetch.debug (fun m -> m"TLS: received: %S\n%!"
+                       (Bytes.sub_string underlying_buf 0 len_ret));
       begin match Tls.Engine.handle_tls fd.state @@
         let cs = Cstruct.create len_ret in
         Cstruct.blit_from_bytes underlying_buf 0 cs 0 len_ret; cs with
@@ -139,21 +141,22 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
         Cstruct.blit_to_bytes data 0 buf 0 recvd_len ;
         Error recvd_len
       | `Ok ((`Eof | `Alert _), _, `Data None) ->
-        Ofetch.debug "EOF or ALERT with NO data\n%!";
+        Ofetch.debug (fun m -> m"TLS: EOF or ALERT with NO data\n%!");
         Error 0
       | `Fail (msg, _) ->
         (* ignore response, kill connection *)
-        Ofetch.debug "TLS FAIL: %s\n%!" (Tls.Engine.string_of_failure msg);
+        Ofetch.debug (fun m ->
+            m"TLS: FAIL: %s\n%!" (Tls.Engine.string_of_failure msg));
         Error 0
       | `Ok (`Ok state, `Response resp, `Data recvd) ->
           (* set new [state], send [resp], recv [data] *)
           Ok (begin match recvd with
-              | None -> Ofetch.debug "recvd len 0\n%!"; 0
+              | None -> Ofetch.debug (fun m -> m"TLS: recvd len 0\n%!"); 0
               | Some recvd_data ->
                 let recvd_len = Cstruct.len recvd_data in
                 Cstruct.blit_to_bytes recvd_data 0 buf 0 recvd_len ;
-                Ofetch.debug "received from upstream: %d: %S\n%!"
-                  recvd_len (Bytes.sub_string buf 0 recvd_len);
+                Ofetch.debug (fun m -> m"TLS: rcvd from upstream: %d: %S\n%!"
+                                 recvd_len (Bytes.sub_string buf 0 recvd_len));
                 recvd_len
             end,
               TLS { state; underlying_t ;
@@ -168,10 +171,11 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
       : (int * Underlying.t tt,int) result=
       match tt with
       | TLS fd ->
-        Ofetch.debug "Ofetch.recv_peer getting TLS stream\n%!";
+        Ofetch.debug (fun m -> m"TLS: Ofetch.recv_peer getting TLS stream\n%!");
         recv_peer_tls_t fd ~buf ~pos ~len
       | Passthru fd ->
-        Ofetch.debug "Ofetch.recv_peer getting some Passthru data\n%!";
+        Ofetch.debug (fun m ->
+            m"TLS: Ofetch.recv_peer getting some Passthru data\n%!");
         begin match Underlying.recv_peer fd ~buf ~pos ~len with
           | Ok (rlen, nfd) -> Ok (rlen, Passthru nfd)
           | Error _ as err -> err
@@ -208,8 +212,8 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
           | rlen, nfd -> rlen, Passthru nfd
         end
       | TLS fd ->
-        Ofetch.debug "Ofetch_tls.write_peer writing %S\n%!"
-          (String.sub buf pos len);
+        Ofetch.debug (fun m -> m"Ofetch_tls.write_peer writing %S\n%!"
+                         (String.sub buf pos len));
         let wlen, nfd = write_peer_tls_t fd ~buf ~pos ~len in
         wlen, TLS nfd
 end
