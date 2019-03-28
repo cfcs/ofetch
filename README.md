@@ -1,4 +1,4 @@
-## ofetch [![Build status](https://travis-ci.org/cfcs/ofetch.svg?branch=master)]
+## ofetch [![Build status](https://travis-ci.org/cfcs/ofetch.svg?branch=master)](https://travis-ci.org/cfcs/ofetch)
 
 This is a HTTP client relying solely on the OCaml standard library.
 
