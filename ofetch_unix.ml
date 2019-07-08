@@ -54,7 +54,7 @@ let write_peer t ~buf ~pos ~len =
 
 let init ~(protocol:string) ((inet_addr, port) : init_data) =
   if protocol <> "tcp" then
-    Error ("Unsupported protocol: %S" ^ String.escaped protocol)
+    Error ("Unsupported protocol: " ^ String.escaped protocol)
   else
   let _ = protocol in
   (* not using UnixLabels here since 4.05 introduces new args: *)
