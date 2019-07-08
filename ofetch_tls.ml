@@ -1,6 +1,7 @@
 type 'underlying_t tls_t =
   { state : Tls.Engine.state ;
     wire_send_queue : string list ;
+    plaintext_incoming : Cstruct.t option ;
     underlying_t : 'underlying_t ;
   }
 
@@ -47,8 +48,8 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
           | n , underlying_t ->
             {t with underlying_t ;
                     wire_send_queue =
-                      ( if len-n <> 0 then [String.(sub hd n (len-n))]
-                        else []) @ tl;}
+                      ( if len-n > 0 then [String.(sub hd n (len-n))]
+                        else begin assert (0=len-n); [] end) @ tl;}
         end
 
     let tls_is_writeable t =
@@ -115,7 +116,7 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
           let state, to_send = Tls.Engine.client tls_config in
           Underlying.init ~protocol:"tcp" underlying_init
             >>| fun underlying_t ->
-            (TLS {state ; underlying_t ;
+            (TLS {state ; underlying_t ; plaintext_incoming = None ;
                     wire_send_queue = [Cstruct.to_string to_send]})
         | "tcp" ->
           Underlying.init ~protocol:"tcp" underlying_init >>| fun x -> Passthru x
@@ -124,10 +125,11 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
       end
 
     let recv_peer_tls_t (fd: 'a tls_t) ~buf ~(pos:int) ~(len:int)
-      : (int * t, int) result =
-      Ofetch.debug (fun m -> m"TLS: reading from underlying\n%!");
+      : (int * t, string) result =
+      assert (fd.plaintext_incoming = None);
+      Ofetch.debug (fun m -> m"TLS: reading from underlying (pos:%d)\n%!" pos);
       let underlying_buf = Bytes.init len (fun _ -> '\x00') in
-      Underlying.recv_peer fd.underlying_t ~buf:underlying_buf ~pos ~len
+      Underlying.recv_peer fd.underlying_t ~buf:underlying_buf ~pos:0 ~len
       >>= fun (len_ret, underlying_t) ->
       Ofetch.debug (fun m -> m"TLS: received: %S\n%!"
                        (Bytes.sub_string underlying_buf 0 len_ret));
@@ -137,42 +139,57 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
       | `Ok ((`Eof | `Alert _), `Response _, `Data (Some data)) ->
         (* ignore response, kill connection, return data.
            TODO maybe we should try to handle the Response. *)
-        let recvd_len = Cstruct.len data in
-        Cstruct.blit_to_bytes data 0 buf 0 recvd_len ;
-        Error recvd_len
+        Error (Cstruct.to_string data)
       | `Ok ((`Eof | `Alert _), _, `Data None) ->
         Ofetch.debug (fun m -> m"TLS: EOF or ALERT with NO data\n%!");
-        Error 0
+        Error ""
       | `Fail (msg, _) ->
         (* ignore response, kill connection *)
         Ofetch.debug (fun m ->
             m"TLS: FAIL: %s\n%!" (Tls.Engine.string_of_failure msg));
-        Error 0
+        Error ""
       | `Ok (`Ok state, `Response resp, `Data recvd) ->
-          (* set new [state], send [resp], recv [data] *)
-          Ok (begin match recvd with
-              | None -> Ofetch.debug (fun m -> m"TLS: recvd len 0\n%!"); 0
-              | Some recvd_data ->
-                let recvd_len = Cstruct.len recvd_data in
-                Cstruct.blit_to_bytes recvd_data 0 buf 0 recvd_len ;
-                Ofetch.debug (fun m -> m"TLS: rcvd from upstream: %d: %S\n%!"
-                                 recvd_len (Bytes.sub_string buf 0 recvd_len));
-                recvd_len
-            end,
-              TLS { state; underlying_t ;
-                      wire_send_queue = fd.wire_send_queue @ match resp with
-                        | Some resp_data when Cstruct.len resp_data <> 0 ->
-                          [Cstruct.to_string resp_data]
-                        | Some _ | None -> []
-                    })
+        (* set new [state], send [resp], recv [data] *)
+        let ret_bytes, plaintext_incoming =
+          begin match recvd with
+            | None ->
+              Ofetch.debug (fun m -> m"TLS: recvd len 0\n%!");
+              0, None
+            | Some recvd_data ->
+              let recvd_len = Cstruct.len recvd_data in
+              let actual_len = max 0 (min recvd_len (len-pos)) in
+              Cstruct.blit_to_bytes recvd_data 0 buf pos actual_len ;
+              Ofetch.debug (fun m -> m"TLS: rcvd (err) from upstream: %d: %S\n%!"
+                               recvd_len (Bytes.sub_string buf pos actual_len));
+              actual_len, if actual_len <> recvd_len then
+                Some (Cstruct.shift recvd_data actual_len) else None
+          end
+        in
+        Ok (ret_bytes,
+            TLS { state; underlying_t ; plaintext_incoming ;
+                  wire_send_queue = fd.wire_send_queue @ match resp with
+                    | Some resp_data when Cstruct.len resp_data <> 0 ->
+                      [Cstruct.to_string resp_data]
+                    | Some _ | None -> []
+                })
       end
 
     let recv_peer (tt:t) ~(buf:bytes) ~pos ~len
-      : (int * Underlying.t tt,int) result=
+      : (int * Underlying.t tt,string) result=
       match tt with
-      | TLS fd ->
+      | TLS ({ plaintext_incoming = None; _ } as fd) ->
         Ofetch.debug (fun m -> m"TLS: Ofetch.recv_peer getting TLS stream\n%!");
         recv_peer_tls_t fd ~buf ~pos ~len
+      | TLS ({ plaintext_incoming = Some plaintext ; _ } as fd) ->
+        let rlen = max 0 (min (len-pos) (Cstruct.len plaintext)) in
+                Ofetch.debug (fun m ->
+            m"TLS: Ofetch.recv_peer returning buffered data (%d/%d)\n%!"
+              rlen (Cstruct.len plaintext - rlen));
+        Cstruct.blit_to_bytes plaintext 0 buf pos rlen ;
+        let plaintext_incoming =
+          if rlen < Cstruct.len plaintext then begin
+            Some (Cstruct.shift plaintext rlen) end else None in
+        Ok (rlen, TLS {fd with plaintext_incoming})
       | Passthru fd ->
         Ofetch.debug (fun m ->
             m"TLS: Ofetch.recv_peer getting some Passthru data\n%!");
@@ -186,8 +203,9 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
       if no_more || len = 0 then
         0, t
       else begin
-        let to_send = Cstruct.of_string ~off:pos ~len buf in
-        match Tls.Engine.send_application_data t.state [to_send] with
+        match
+          let plain = Cstruct.of_string ~off:pos ~len buf in
+          Tls.Engine.send_application_data t.state [plain] with
         | None -> failwith "TODO trying to send to invalid state"
         | Some (state, to_send) ->
           let to_send = Cstruct.to_string to_send in
@@ -197,6 +215,7 @@ module Wrap_tls : functor (Underlying : Ofetch.Peer_S) ->
           in
           len,
           { state; underlying_t;
+            plaintext_incoming = t.plaintext_incoming;
             wire_send_queue =
               (if written_len <> String.length to_send then
                  [String.sub to_send (pos+written_len) (len-written_len)

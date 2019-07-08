@@ -1,8 +1,7 @@
 type init_data = (Unix.inet_addr * int)
 
 type t = { peer_fd : Unix.file_descr ;
-           buflen : int ;
-         }
+           buflen : int ; }
 
 let equal a b = a = b
 
@@ -47,7 +46,7 @@ let select
 
 let recv_peer t ~buf ~pos ~len =
   match UnixLabels.read t.peer_fd ~buf ~pos ~len with
-  | 0 -> Error 0
+  | 0 -> Error ""
   | amount_read -> Ok (amount_read, t)
 
 let write_peer t ~buf ~pos ~len =

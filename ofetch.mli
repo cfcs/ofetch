@@ -37,7 +37,7 @@ sig
   *)
 
   val recv_peer :
-    t -> buf:bytes -> pos:int -> len:int -> (int * t, int) result
+    t -> buf:bytes -> pos:int -> len:int -> (int * t, string) result
   (** [recv_peer state ~buf ~pos ~len] is up to [len] bytes from [state]
       blitted into [buf] at [pos].
       [len] represents the maximum size the caller is willing to read,
@@ -118,13 +118,13 @@ val parse_content_range : string -> (content_range_response, string) result
 val parse_headers : string -> (response_transfer_method, string) result
 val fetch_download :
   write_local:(Bytes.t -> int -> int -> int) ->
-  recv_peer:(Bytes.t -> int -> int -> (int, int) result) ->
+  recv_peer:(Bytes.t -> int -> int -> (int, string) result) ->
   'handle request -> 'handle data_cb_return
 val new_request :
   connection_handle:'a ->
   buflen:int ->
   write_local:(Bytes.t -> int -> int -> int) ->
-  recv_peer:(Bytes.t -> int -> int -> (int, int) result) ->
+  recv_peer:(Bytes.t -> int -> int -> (int, string) result) ->
   write_peer:(string -> int -> int -> int) ->
   path:string -> hostname:string -> 'a request
 val fetch_select :

@@ -32,7 +32,14 @@ sig
   *)
 
   val recv_peer : t -> buf:bytes -> pos:int -> len:int ->
-    (int * t, int) result
+    (int * t, string) result
+  (** [recv_peer state ~buf ~pos ~len] reads up to [len] bytes from [state]
+      into [buf] at offset [pos].
+      The returned value is either
+      - [Ok (amount_read, next_state)] where [amount_read] is the actual amount
+      of bytes read, which may be lower than [len].
+      - [Error remaining] where [remaining] is the remaining input buffer.
+  *)
 
   val write_peer : t -> buf:string -> pos:int -> len:int -> int * t
   (** write a substring to a peer (or buffer it).
@@ -283,7 +290,7 @@ let parse_headers str =
 
 let fetch_download ~write_local
     ~(recv_peer: Bytes.t -> int -> int ->
-      (int, int) result)
+      (int, string) result)
     ( { buf ; headers; header_off; chunked_buf ; saved_bytes ;
         state ; read_cb = _ ; write_cb = _ ; io : 'handle = _ (*TODO*)
       } as request)
@@ -292,9 +299,15 @@ let fetch_download ~write_local
   let save_data ~off chunk_len =
     let written = write_local buf off chunk_len in
     saved_bytes := !saved_bytes + written ;
-    debug (fun m -> m"save_data: off %d chunk_len %d written: %d: \
+    debug (fun m ->
+        let sub = Bytes.sub_string buf off chunk_len in
+        let all_zero =
+          let x = ref true in String.iteri (fun i -> function
+              |'\000'->()
+              |_->x:=i < off || i > off+chunk_len) sub ; !x in
+        m"save_data: off %d chunk_len %d written: %d: \
                       \x1b[31m%S\x1b[0m\n%!" (* <-- color data red *)
-              off chunk_len written @@ Bytes.sub_string buf off chunk_len) ;
+              off chunk_len written (if all_zero then "ALL-ZERO" else sub)) ;
     assert(written = chunk_len)
     (* TODO this ought to return true (unless out of quota/disk space) since our
        data files are not opened O_NONBLOCK. that is however an assumption that
@@ -481,18 +494,29 @@ let fetch_download ~write_local
       end
   in
   begin match recv_peer buf 0 (Bytes.length buf) with
-    | Error 0 -> debug (fun m -> m"got ERROR 0\n%!");
-      Error "Error, read 0 bytes."
-    | Error len_read ->
-      debug (fun m -> m"got error XXX %d\n%!" len_read) ;
-      begin match read_and_handle_bytes state 0 len_read with
+    | Error input_buffer ->
+      (* The underlying transport has stopped working, either due to network
+         errors or because the server has closed the connection correctly after
+         sending us the data we need to complete parsing the response.
+         At this point [input_buffer] may be larger than [buf].
+         We need to blit into [buf] as many times as possible and try to exhaust
+         [input_buffer]: *)
+      let rec loop = function
+        | state, 0 -> Ok state
+        | state, leftover ->
+          let this = min leftover (Bytes.length buf) in
+          String.blit input_buffer 0 buf 0 this ;
+          read_and_handle_bytes state 0 this >>= fun state ->
+          loop (state, leftover - this)
+      in
+      begin match loop (state, String.length input_buffer) with
         | Ok Done -> Ok ({request with state = Done; read_cb = None }, None)
         | Ok Reading_headers ->
           Error "Unexpected end of HTTP stream while reading headers"
         | Ok Reading_body _ ->
           Error "Unexpected end of HTTP stream while reading body content"
         | Error msg -> Error ("Got EOF|ALERT and triggered error: " ^ msg)
-        end
+      end
     | Ok len_read ->
       read_and_handle_bytes state 0 len_read >>| begin function
         | Done -> {request with state = Done; read_cb = None }, None
